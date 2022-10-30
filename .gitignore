@@ -50,3 +50,12 @@ modules.order
 Module.symvers
 Mkfile.old
 dkms.conf
+
+# Generated file
+*.dwo
+module/include/systab.h
+local/
+wrapper/target-preload.c
+echo/io_uring_echo_server
+echo/epoll_echo_server
+echo/rps
