@@ -2,8 +2,7 @@
 #define _ESCA_H
 
 /*
-* THIS FILE CAN"T CONTAIN KERNEL DATA STRUCTURE,
-* BECAUSE IT'S SHARED WITH USER LAND
+* Header for userland
 */
 
 #include <stdatomic.h>
@@ -95,18 +94,5 @@ typedef struct esca_table {
 typedef struct esca_wkr_args {
     int id;
 } esca_wkr_args_t;
-
-/* store in first entry of each esca_table */
-
-#if 0
-typedef struct esca_info {
-
-} esca_info_t;
-
-typedef struct esca_meta {
-    esca_table_t table[TABLE_LEN_LIMIT];
-    esca_info_t info[TABLE_LEN_LIMIT];
-} esca_meta_t;
-#endif
 
 #endif

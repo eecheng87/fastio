@@ -11,8 +11,17 @@
 #define MSG_MASK (MAX_POOL_MSG_SIZE - 1)
 #define POOL_UNIT 8
 
+/* syscall number */
+#define __NR_esca_register 400
+#define __NR_esca_wakeup 401
+#define __NR_esca_wait 402
+#define __NR_esca_config 403
+
+/* batch table entry info */
+#define BENTRY_EMPTY 0
+#define BENTRY_BUSY 1
+
 #include "../module/include/esca.h"
-#include "../module/syscall.h"
 #include <dlfcn.h>
 #include <inttypes.h>
 #include <pthread.h>
@@ -25,6 +34,33 @@
 #include <sys/types.h>
 #include <sys/uio.h>
 #include <time.h>
+
+
+#include <asm/unistd.h>
+#include <errno.h> /* needed by syscall macro */
+#ifndef syscall
+#include <unistd.h> /* syscall() */
+#endif
+
+static inline long
+lioo_register(esca_table_t* table,
+    esca_table_entry_t* e1,
+    esca_table_entry_t* e2)
+{
+    syscall(__NR_esca_register, table, e1, e2);
+}
+
+static inline long
+lioo_wait()
+{
+    syscall(__NR_esca_wait);
+}
+
+static inline long
+lioo_init_conf(esca_config_t* conf)
+{
+    syscall(__NR_esca_config, conf);
+}
 
 typedef unsigned long long ull;
 
