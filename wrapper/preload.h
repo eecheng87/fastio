@@ -35,7 +35,6 @@
 #include <sys/uio.h>
 #include <time.h>
 
-
 #include <asm/unistd.h>
 #include <errno.h> /* needed by syscall macro */
 #ifndef syscall
@@ -80,3 +79,5 @@ typedef long (*sendfile_t)(int out_fd, int in_fd, off_t* offset, size_t count);
 sendfile_t real_sendfile;
 typedef long (*sendmsg_t)(int sockfd, const struct msghdr* msg, int flags);
 sendmsg_t real_sendmsg;
+typedef long (*send_t)(int sockfd, const void* buf, size_t len, int flags);
+send_t real_send;

@@ -29,8 +29,8 @@
 #include "include/symbol.h"
 #include "include/systab.h"
 #include "include/util.h"
-#include "syscall.h"
 #include "lioo.h"
+#include "syscall.h"
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Steven Cheng");
@@ -62,11 +62,16 @@ struct page* table_pinned_pages[CPU_NUM_LIMIT][TABLE_LEN_LIMIT];
 struct page* shared_info_pinned_pages[1];
 esca_table_t* table[CPU_NUM_LIMIT];
 
+/* args for creating io_thread */
+esca_wkr_args_t* wq_wrk_args[WORKQUEUE_DEFAULT_THREAD_NUMS];
+
 short submitted[CPU_NUM_LIMIT];
 
 static int worker(void* arg);
 
 // TODO: encapsulate them
+wait_queue_head_t wq_worker_wq[WORKQUEUE_DEFAULT_THREAD_NUMS];
+wait_queue_head_t wq_worker_wait[WORKQUEUE_DEFAULT_THREAD_NUMS];
 wait_queue_head_t worker_wait[CPU_NUM_LIMIT];
 wait_queue_head_t wq[CPU_NUM_LIMIT];
 // int flags[MAX_CPU_NUM]; // need_wake_up; this might be shared with user space (be aware of memory barrier)
@@ -219,12 +224,25 @@ static void disable_cycle_counter_el0(void* data)
 }
 #endif
 
-char* buf;
+static void copy_table_entry(int ctx_idx, int wrk_idx, esca_table_entry_t* ent)
+{
+    int tail = ctx[ctx_idx]->df_tail[wrk_idx];
+    esca_table_entry_t* dst = &ctx[ctx_idx]->deferred_list[wrk_idx][tail];
 
-static int worker(void* arg)
+    dst->nargs = ent->nargs;
+    dst->sysnum = ent->sysnum;
+
+    for (int i = 0; i < 6; i++)
+        dst->args[i] = ent->args[i];
+
+    smp_store_release(&dst->rstatus, ent->rstatus);
+}
+
+static int main_worker(void* arg)
 {
     allow_signal(SIGKILL);
-    int cur_cpuid = ((esca_wkr_args_t*)arg)->id;
+    int offloaded, res;
+    int cur_cpuid = ((esca_wkr_args_t*)arg)->ctx_id;
     unsigned long timeout = 0;
 
     if (ESCA_LOCALIZE)
@@ -232,11 +250,11 @@ static int worker(void* arg)
     else
         set_cpus_allowed_ptr(current, cpumask_of(cur_cpuid) + AFF_OFF);
 
+    printk("In main-worker, pid = %d, bound at cpu %d, cur_cpupid = %d\n",
+        current->pid, smp_processor_id(), cur_cpuid);
+
     init_waitqueue_head(&wq[cur_cpuid]);
     DEFINE_WAIT(wait);
-
-    printk("im in worker, pid = %d, bound at cpu %d, cur_cpupid = %d\n",
-        current->pid, smp_processor_id(), cur_cpuid);
 
     while (1) {
         int i = table[cur_cpuid]->head_table;
@@ -246,7 +264,7 @@ static int worker(void* arg)
         while (smp_load_acquire(&table[cur_cpuid]->tables[i][j].rstatus) == BENTRY_EMPTY) {
             if (signal_pending(current)) {
                 printk("detect signal\n");
-                goto exit_worker;
+                goto main_worker_exit;
             }
             // FIXME:
             if (!time_after(jiffies, timeout)) {
@@ -280,21 +298,49 @@ static int worker(void* arg)
         submitted[cur_cpuid] = (tail_index >= head_index)
             ? tail_index - head_index
             : MAX_TABLE_ENTRY * MAX_TABLE_LEN - head_index + tail_index;
+        offloaded = 0;
 
         while (submitted[cur_cpuid] != 0) {
-            table[cur_cpuid]->tables[i][j].sysret = indirect_call(
-                syscall_table_ptr[table[cur_cpuid]->tables[i][j].sysnum],
-                table[cur_cpuid]->tables[i][j].nargs,
-                table[cur_cpuid]->tables[i][j].args);
+            esca_table_entry_t* ent = &table[cur_cpuid]->tables[i][j];
+
+            res = indirect_call(syscall_table_ptr[ent->sysnum], ent->nargs, ent->args);
+
+            if (res == -EAGAIN) {
+
+                // TODO: choose arg. depending on syscall
+                int hash = ent->args[0] & (WORKQUEUE_DEFAULT_THREAD_NUMS - 1);
+                offloaded++;
+
+                copy_table_entry(cur_cpuid, hash, ent);
+                ctx[cur_cpuid]->df_tail[hash] = (ctx[cur_cpuid]->df_tail[hash] + 1) & ctx[cur_cpuid]->df_mask;
+
+                if (READ_ONCE(work_node_reg[hash]->status) == IDLE) {
+
+                    spin_lock_irq(&ctx[cur_cpuid]->l_lock);
+
+                    // remove current node in free list
+                    list_del(&work_node_reg[hash]->list);
+
+                    // append current node to the tail of running list
+                    list_add_tail(&work_node_reg[hash]->list, &ctx[cur_cpuid]->running_list->list);
+
+                    ctx[cur_cpuid]->free_list->len--;
+                    ctx[cur_cpuid]->running_list->len++;
+                    spin_unlock_irq(&ctx[cur_cpuid]->l_lock);
+
+                    wake_up(&wq_worker_wq[hash]);
+                }
+            } else {
+                // TODO: push result to completion queue
+                ent->sysret = res;
+            }
 
             // FIXME: need barrier?
-            table[cur_cpuid]->tables[i][j].rstatus = BENTRY_EMPTY;
-
-#if 0
+            ent->rstatus = BENTRY_EMPTY;
+            submitted[cur_cpuid]--;
+#if 1
             printk(KERN_INFO "Index %d,%d do syscall %d : %d = (%d, %d, %ld, %d) at cpu%d\n", i, j,
-                table[cur_cpuid]->tables[i][j].sysnum, table[cur_cpuid]->tables[i][j].sysret, table[cur_cpuid]->tables[i][j].args[0],
-                table[cur_cpuid]->tables[i][j].args[1], table[cur_cpuid]->tables[i][j].args[2],
-                table[cur_cpuid]->tables[i][j].args[3], smp_processor_id());
+                ent->sysnum, ent->sysret, ent->args[0], ent->args[1], ent->args[2], ent->args[3], smp_processor_id());
 #endif
 
             if (j == MAX_TABLE_ENTRY - 1) {
@@ -303,8 +349,6 @@ static int worker(void* arg)
             } else {
                 j++;
             }
-
-            submitted[cur_cpuid]--;
 
             short done = 1;
             if (cur_cpuid % RATIO == 0) {
@@ -315,7 +359,10 @@ static int worker(void* arg)
                     }
                 }
                 if (done == 1) {
-                    // TODO: make sure this only be executed one time
+                    while (ctx[cur_cpuid]->comp_task_num != offloaded) {
+                        cond_resched();
+                    }
+                    ctx[cur_cpuid]->comp_task_num = 0;
                     wake_up_interruptible(&wq[cur_cpuid]);
                 }
             }
@@ -327,12 +374,98 @@ static int worker(void* arg)
         table[cur_cpuid]->head_entry = j;
 
         if (signal_pending(current)) {
-            printk("detect signal\n");
-            goto exit_worker;
+            printk("detect signal from main_worker\n");
+            goto main_worker_exit;
         }
     }
-exit_worker:
-    printk("kernel thread exit\n");
+
+main_worker_exit:
+    printk("main_worker exit\n");
+    do_exit(0);
+    return 0;
+}
+
+static int wq_worker(void* arg)
+{
+    allow_signal(SIGKILL);
+
+    int ret = 0, head;
+    int ctx_id = ((esca_wkr_args_t*)arg)->ctx_id;
+    int wq_wrk_id = ((esca_wkr_args_t*)arg)->wq_wrk_id;
+
+    DEFINE_WAIT(wq_wait);
+    init_waitqueue_head(&wq_worker_wq[wq_wrk_id]);
+
+    esca_table_entry_t* ent;
+    struct list_head* self = ((esca_wkr_args_t*)arg)->self;
+
+    // TODO: set affinity
+    printk("wq-%d is launching, running on CPU-%d\n", wq_wrk_id, smp_processor_id());
+
+    while (1) {
+    wq_worker_advance:
+        head = ctx[ctx_id]->df_head[wq_wrk_id];
+        ent = &ctx[ctx_id]->deferred_list[wq_wrk_id][head];
+
+        if (smp_load_acquire(&ent->rstatus) == BENTRY_EMPTY) {
+            goto wq_worker_sleep;
+        }
+
+        // update indexing
+
+        do {
+            ret = indirect_call(syscall_table_ptr[ent->sysnum], ent->nargs, ent->args);
+
+#if 1
+            printk(KERN_INFO "In wq-%d, do syscall %d : %d = (%d, %d, %ld, %d) at cpu%d\n", wq_wrk_id,
+                ent->sysnum, ent->sysret, ent->args[0], ent->args[1], ent->args[2], ent->args[3], smp_processor_id());
+#endif
+
+            if (ret != -EAGAIN)
+                break;
+            cond_resched();
+        } while (1);
+
+        ctx[ctx_id]->df_head[wq_wrk_id] = (head + 1) & ctx[ctx_id]->df_mask;
+
+        // TODO: push result to completion queue
+        ent->sysret = ret;
+        ctx[ctx_id]->comp_task_num++;
+        ent->rstatus = BENTRY_EMPTY;
+
+        goto wq_worker_advance;
+
+    wq_worker_sleep:
+        printk("wq-%d go to sleep\n", wq_wrk_id);
+        spin_lock_irq(&ctx[ctx_id]->l_lock);
+
+        // remove current node in running list
+        list_del(self);
+
+        // append current node to the tail of free list
+        list_add_tail(self, &ctx[ctx_id]->free_list->list);
+
+        ctx[ctx_id]->free_list->len++;
+        ctx[ctx_id]->running_list->len--;
+
+        spin_unlock_irq(&ctx[ctx_id]->l_lock);
+        work_node_reg[wq_wrk_id]->status = IDLE;
+
+        prepare_to_wait(&wq_worker_wq[wq_wrk_id], &wq_wait, TASK_INTERRUPTIBLE);
+        schedule();
+        printk("wq-%d is waken up\n", wq_wrk_id);
+        // wake up by main_worker
+        work_node_reg[wq_wrk_id]->status = RUNNING;
+        finish_wait(&wq_worker_wq[wq_wrk_id], &wq_wait);
+
+        if (signal_pending(current)) {
+            printk("detect signal from wq_worker\n");
+            goto wq_worker_exit;
+        }
+    }
+
+wq_worker_exit:
+    printk("wq_worker exit\n");
     do_exit(0);
     return 0;
 }
@@ -350,11 +483,10 @@ asmlinkage long sys_esca_register(const struct __user pt_regs* regs)
     // FIXME: check if p1[0] is needed
     struct file* file;
     int n_page, id = p1[2], fd, set_index = p1[3];
-    esca_wkr_args_t* args;
 
     // FIXME: release
-    args = (esca_wkr_args_t*)kmalloc(sizeof(esca_wkr_args_t), GFP_KERNEL);
-    args->id = id;
+    esca_wkr_args_t* main_wrk_args = (esca_wkr_args_t*)kmalloc(sizeof(esca_wkr_args_t), GFP_KERNEL);
+    main_wrk_args->ctx_id = id;
 
     if (p1[0]) {
         /* header is not null */
@@ -388,6 +520,10 @@ asmlinkage long sys_esca_register(const struct __user pt_regs* regs)
         for (int k = 0; k < MAX_TABLE_ENTRY; k++)
             table[id]->tables[j][k].rstatus = BENTRY_EMPTY;
 
+    for (int i = 0; i < CPU_NUM_LIMIT; i++) {
+        worker_task[i] = NULL;
+    }
+
     // TODO: merge them
     table[id]->head_table = table[id]->tail_table = 0;
     table[id]->head_entry = table[id]->tail_entry = 0;
@@ -398,11 +534,67 @@ asmlinkage long sys_esca_register(const struct __user pt_regs* regs)
     table[id]->idle_time = msecs_to_jiffies(DEFAULT_IDLE_TIME);
     init_waitqueue_head(&worker_wait[id]);
 
-    // closure is important
-    worker_task[id] = create_io_thread_ptr(worker, args, -1);
+    // setup main offloading-thread
+    worker_task[id] = create_io_thread_ptr(main_worker, main_wrk_args, -1);
+
+    // setup context of fastio
+
+    ctx[id] = kmalloc(sizeof(struct fastio_ctx), GFP_KERNEL);
+    ctx[id]->running_list = ctx[id]->free_list = NULL;
+    ctx[id]->df_mask = MAX_DEFERRED_NUM - 1;
+    ctx[id]->comp_task_num = 0;
+
+    for (int i = 0; i < WORKQUEUE_DEFAULT_THREAD_NUMS; i++) {
+        ctx[id]->df_head[i] = ctx[id]->df_tail[i] = 0;
+        init_waitqueue_head(&wq_worker_wait[i]);
+
+        for (int j = 0; j < MAX_DEFERRED_NUM; j++) {
+            ctx[id]->deferred_list[i][j].rstatus = BENTRY_EMPTY;
+        }
+    }
+
+    spin_lock_init(&ctx[id]->l_lock);
+    spin_lock_init(&ctx[id]->df_lock);
+
+    create_worker_pool(WORKQUEUE_DEFAULT_THREAD_NUMS, id);
+
     wake_up_new_task_ptr(worker_task[id]);
 
+    for (int i = 0; i < WORKQUEUE_DEFAULT_THREAD_NUMS; i++)
+        wake_up_new_task_ptr(work_node_reg[i]->task);
+
     return 0;
+}
+
+static void create_worker_pool(int concurrency, int ctx_id)
+{
+    struct fastio_work_meta* rhead = kmalloc(sizeof(struct fastio_work_meta), GFP_KERNEL);
+    struct fastio_work_meta* fhead = kmalloc(sizeof(struct fastio_work_meta), GFP_KERNEL);
+
+    INIT_LIST_HEAD(&rhead->list);
+    INIT_LIST_HEAD(&fhead->list);
+
+    rhead->len = fhead->len = 0;
+
+    ctx[ctx_id]->running_list = rhead;
+    ctx[ctx_id]->free_list = fhead;
+
+    for (int arg_idx = 0; arg_idx < concurrency; arg_idx++) {
+        struct fastio_work_node* node = kmalloc(sizeof(struct fastio_work_node), GFP_KERNEL);
+
+        work_node_reg[arg_idx] = node;
+
+        wq_wrk_args[arg_idx] = (esca_wkr_args_t*)kmalloc(sizeof(esca_wkr_args_t), GFP_KERNEL);
+        wq_wrk_args[arg_idx]->ctx_id = ctx_id;
+        wq_wrk_args[arg_idx]->wq_wrk_id = arg_idx;
+        wq_wrk_args[arg_idx]->self = &node->list;
+
+        node->status = IDLE;
+        node->task = create_io_thread_ptr(wq_worker, wq_wrk_args[arg_idx], -1);
+        spin_lock_init(&node->wrk_lock);
+        list_add_tail(&node->list, &ctx[ctx_id]->running_list->list);
+        ctx[ctx_id]->free_list->len++;
+    }
 }
 
 asmlinkage void sys_lioo_exit(void)
@@ -518,6 +710,9 @@ static void __exit lioo_exit(void)
     on_each_cpu(disable_cycle_counter_el0, NULL, 1);
 #endif
 
+    //kfree(main_wrk_args);
+    //for (int i = 0; i < WORKQUEUE_DEFAULT_THREAD_NUMS; i++)
+    //    kfree(wq_wrk_args[i]);
     // if(worker_task)
     //  kthread_stop(worker_task);
 

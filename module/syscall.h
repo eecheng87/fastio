@@ -2,8 +2,8 @@
 #define SYSCALL_H
 
 /*
-* Header for kernel space
-*/
+ * Header for kernel space
+ */
 
 #define __NR_esca_register 400
 #define __NR_esca_wakeup 401

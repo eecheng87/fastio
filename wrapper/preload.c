@@ -209,6 +209,7 @@ __attribute__((constructor)) static void setup(void)
     real_shutdown = real_shutdown ? real_shutdown : dlsym(RTLD_NEXT, "shutdown");
     real_sendfile = real_sendfile ? real_sendfile : dlsym(RTLD_NEXT, "sendfile");
     real_sendmsg = real_sendmsg ? real_sendmsg : dlsym(RTLD_NEXT, "sendmsg");
+    real_send = real_send ? real_send : dlsym(RTLD_NEXT, "send");
 
     /* configuration */
     config = malloc(sizeof(esca_config_t));
