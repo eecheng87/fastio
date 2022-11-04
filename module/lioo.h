@@ -5,8 +5,6 @@
  * Header for kernel space
  */
 
-//#include "list.h"
-
 /* Limit */
 #define CPU_NUM_LIMIT 100
 #define TABLE_LEN_LIMIT 10
@@ -68,7 +66,8 @@ typedef struct esca_config {
     int max_table_len;
     int max_usr_worker;
     int max_ker_worker;
-    int default_idle_time;
+    int default_main_worker_idle_time;
+    int default_wq_worker_idle_time;
     int affinity_offset;
 } esca_config_t;
 
@@ -79,7 +78,8 @@ static const esca_config_t default_config
           .max_table_len = 1,
           .max_usr_worker = 1,
           .max_ker_worker = 1,
-          .default_idle_time = 150,
+          .default_main_worker_idle_time = 150,
+          .default_wq_worker_idle_time = 150,
           .affinity_offset = 0
       };
 
@@ -95,6 +95,7 @@ enum work_status {
 
 struct fastio_work_node {
     int table;
+    int cache_comp_num;
     wrk_status status;
     spinlock_t wrk_lock;
     struct task_struct* task;
@@ -110,10 +111,12 @@ struct fastio_work_meta {
 struct fastio_ctx {
     spinlock_t l_lock;
     spinlock_t df_lock;
+    spinlock_t comp_lock;
     int df_mask; /* MAX_DEFERRED_NUM - 1 */
     int df_head[WORKQUEUE_DEFAULT_THREAD_NUMS]; /* to be consumed */
     int df_tail[WORKQUEUE_DEFAULT_THREAD_NUMS]; /* to be post */
-    int comp_task_num; /* FIXME: encapsulate later */
+    int comp_num;
+    unsigned idle_time; // in jiffies
     struct fastio_work_meta* running_list;
     struct fastio_work_meta* free_list;
     esca_table_entry_t deferred_list[WORKQUEUE_DEFAULT_THREAD_NUMS][MAX_DEFERRED_NUM];
@@ -122,7 +125,7 @@ struct fastio_ctx* ctx[TABLE_LEN_LIMIT];
 
 /* forward declaration */
 static void create_worker_pool(int, int);
-//static int main_worker(void*);
-//static int wq_worker(void*);
+// static int main_worker(void*);
+// static int wq_worker(void*);
 
 #endif

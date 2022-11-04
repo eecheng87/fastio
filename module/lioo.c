@@ -44,7 +44,8 @@ int MAX_TABLE_LEN;
 int MAX_USR_WORKER;
 int MAX_CPU_NUM;
 int RATIO;
-int DEFAULT_IDLE_TIME;
+int DEFAULT_MAIN_IDLE_TIME;
+int DEFAULT_WQ_IDLE_TIME;
 int AFF_OFF;
 
 /* restore original syscall for recover */
@@ -65,7 +66,7 @@ esca_table_t* table[CPU_NUM_LIMIT];
 /* args for creating io_thread */
 esca_wkr_args_t* wq_wrk_args[WORKQUEUE_DEFAULT_THREAD_NUMS];
 
-short submitted[CPU_NUM_LIMIT];
+short should_be_submitted[CPU_NUM_LIMIT];
 
 static int worker(void* arg);
 
@@ -224,7 +225,7 @@ static void disable_cycle_counter_el0(void* data)
 }
 #endif
 
-static void copy_table_entry(int ctx_idx, int wrk_idx, esca_table_entry_t* ent)
+static void copy_table_entry_and_advance(int ctx_idx, int wrk_idx, esca_table_entry_t* ent)
 {
     int tail = ctx[ctx_idx]->df_tail[wrk_idx];
     esca_table_entry_t* dst = &ctx[ctx_idx]->deferred_list[wrk_idx][tail];
@@ -235,7 +236,9 @@ static void copy_table_entry(int ctx_idx, int wrk_idx, esca_table_entry_t* ent)
     for (int i = 0; i < 6; i++)
         dst->args[i] = ent->args[i];
 
-    smp_store_release(&dst->rstatus, ent->rstatus);
+    ctx[ctx_idx]->df_tail[wrk_idx] = (ctx[ctx_idx]->df_tail[wrk_idx] + 1) & ctx[ctx_idx]->df_mask;
+    ent->rstatus = BENTRY_EMPTY;
+    smp_store_release(&dst->rstatus, BENTRY_BUSY);
 }
 
 static int main_worker(void* arg)
@@ -295,26 +298,25 @@ static int main_worker(void* arg)
 
         head_index = (i * MAX_TABLE_ENTRY) + j;
         tail_index = (table[cur_cpuid]->tail_table * MAX_TABLE_ENTRY) + table[cur_cpuid]->tail_entry;
-        submitted[cur_cpuid] = (tail_index >= head_index)
+        should_be_submitted[cur_cpuid] = (tail_index >= head_index)
             ? tail_index - head_index
             : MAX_TABLE_ENTRY * MAX_TABLE_LEN - head_index + tail_index;
         offloaded = 0;
 
-        while (submitted[cur_cpuid] != 0) {
+        while (should_be_submitted[cur_cpuid] != 0) {
             esca_table_entry_t* ent = &table[cur_cpuid]->tables[i][j];
 
-            res = indirect_call(syscall_table_ptr[ent->sysnum], ent->nargs, ent->args);
+            // res = indirect_call(syscall_table_ptr[ent->sysnum], ent->nargs, ent->args);
 
-            if (res == -EAGAIN) {
+            if (1) { // res == -EAGAIN) {
 
                 // TODO: choose arg. depending on syscall
                 int hash = ent->args[0] & (WORKQUEUE_DEFAULT_THREAD_NUMS - 1);
                 offloaded++;
 
-                copy_table_entry(cur_cpuid, hash, ent);
-                ctx[cur_cpuid]->df_tail[hash] = (ctx[cur_cpuid]->df_tail[hash] + 1) & ctx[cur_cpuid]->df_mask;
+                copy_table_entry_and_advance(cur_cpuid, hash, ent);
 
-                if (READ_ONCE(work_node_reg[hash]->status) == IDLE) {
+                if (smp_load_acquire(&work_node_reg[hash]->status) == IDLE) {
 
                     spin_lock_irq(&ctx[cur_cpuid]->l_lock);
 
@@ -333,15 +335,15 @@ static int main_worker(void* arg)
             } else {
                 // TODO: push result to completion queue
                 ent->sysret = res;
+#if 1
+                printk(KERN_INFO "Index %d,%d do syscall %d : %d = (%d, %d, %ld, %d) at cpu%d\n", i, j,
+                    ent->sysnum, ent->sysret, ent->args[0], ent->args[1], ent->args[2], ent->args[3], smp_processor_id());
+#endif
             }
 
             // FIXME: need barrier?
             ent->rstatus = BENTRY_EMPTY;
-            submitted[cur_cpuid]--;
-#if 1
-            printk(KERN_INFO "Index %d,%d do syscall %d : %d = (%d, %d, %ld, %d) at cpu%d\n", i, j,
-                ent->sysnum, ent->sysret, ent->args[0], ent->args[1], ent->args[2], ent->args[3], smp_processor_id());
-#endif
+            should_be_submitted[cur_cpuid]--;
 
             if (j == MAX_TABLE_ENTRY - 1) {
                 i = (i == MAX_TABLE_LEN - 1) ? 0 : i + 1;
@@ -353,16 +355,17 @@ static int main_worker(void* arg)
             short done = 1;
             if (cur_cpuid % RATIO == 0) {
                 for (int k = cur_cpuid; k < cur_cpuid + RATIO; k++) {
-                    if (submitted[k] != 0) {
+                    if (should_be_submitted[k] != 0) {
                         done = 0;
                         break;
                     }
                 }
                 if (done == 1) {
-                    while (ctx[cur_cpuid]->comp_task_num != offloaded) {
+                    while (ctx[cur_cpuid]->comp_num != offloaded) {
                         cond_resched();
                     }
-                    ctx[cur_cpuid]->comp_task_num = 0;
+                    // don't need lock since no possible update in this moment
+                    ctx[cur_cpuid]->comp_num = 0;
                     wake_up_interruptible(&wq[cur_cpuid]);
                 }
             }
@@ -392,6 +395,7 @@ static int wq_worker(void* arg)
     int ret = 0, head;
     int ctx_id = ((esca_wkr_args_t*)arg)->ctx_id;
     int wq_wrk_id = ((esca_wkr_args_t*)arg)->wq_wrk_id;
+    unsigned long timeout = 0;
 
     DEFINE_WAIT(wq_wait);
     init_waitqueue_head(&wq_worker_wq[wq_wrk_id]);
@@ -407,7 +411,25 @@ static int wq_worker(void* arg)
         head = ctx[ctx_id]->df_head[wq_wrk_id];
         ent = &ctx[ctx_id]->deferred_list[wq_wrk_id][head];
 
-        if (smp_load_acquire(&ent->rstatus) == BENTRY_EMPTY) {
+        while (smp_load_acquire(&ent->rstatus) == BENTRY_EMPTY) {
+            // hybrid (busy waiting + sleep & wait)
+            if (signal_pending(current)) {
+                printk("detect signal from wq_worker\n");
+                goto wq_worker_exit;
+            }
+
+            // force to sleep in first-entrance
+            if (!time_after(jiffies, timeout)) {
+                if (work_node_reg[wq_wrk_id]->cache_comp_num != 0) {
+                    spin_lock_irq(&ctx[ctx_id]->comp_lock);
+                    ctx[ctx_id]->comp_num += work_node_reg[wq_wrk_id]->cache_comp_num;
+                    spin_unlock_irq(&ctx[ctx_id]->comp_lock);
+                    work_node_reg[wq_wrk_id]->cache_comp_num = 0;
+                }
+                cond_resched();
+                continue;
+            }
+
             goto wq_worker_sleep;
         }
 
@@ -430,9 +452,10 @@ static int wq_worker(void* arg)
 
         // TODO: push result to completion queue
         ent->sysret = ret;
-        ctx[ctx_id]->comp_task_num++;
+        work_node_reg[wq_wrk_id]->cache_comp_num++;
         ent->rstatus = BENTRY_EMPTY;
 
+        timeout = jiffies + ctx[ctx_id]->idle_time;
         goto wq_worker_advance;
 
     wq_worker_sleep:
@@ -449,13 +472,17 @@ static int wq_worker(void* arg)
         ctx[ctx_id]->running_list->len--;
 
         spin_unlock_irq(&ctx[ctx_id]->l_lock);
-        work_node_reg[wq_wrk_id]->status = IDLE;
 
         prepare_to_wait(&wq_worker_wq[wq_wrk_id], &wq_wait, TASK_INTERRUPTIBLE);
+
+        smp_store_release(&work_node_reg[wq_wrk_id]->status, IDLE);
+
         schedule();
-        printk("wq-%d is waken up\n", wq_wrk_id);
+
         // wake up by main_worker
+        printk("wq-%d is waken up\n", wq_wrk_id); // FIXME: remove later
         work_node_reg[wq_wrk_id]->status = RUNNING;
+        timeout = jiffies + ctx[ctx_id]->idle_time;
         finish_wait(&wq_worker_wq[wq_wrk_id], &wq_wait);
 
         if (signal_pending(current)) {
@@ -529,9 +556,9 @@ asmlinkage long sys_esca_register(const struct __user pt_regs* regs)
     table[id]->head_entry = table[id]->tail_entry = 0;
 
     // TODO: merge them
-    submitted[id] = 0;
+    should_be_submitted[id] = 0;
     table[id]->flags = 0 | ESCA_WORKER_NEED_WAKEUP;
-    table[id]->idle_time = msecs_to_jiffies(DEFAULT_IDLE_TIME);
+    table[id]->idle_time = msecs_to_jiffies(DEFAULT_MAIN_IDLE_TIME);
     init_waitqueue_head(&worker_wait[id]);
 
     // setup main offloading-thread
@@ -542,7 +569,8 @@ asmlinkage long sys_esca_register(const struct __user pt_regs* regs)
     ctx[id] = kmalloc(sizeof(struct fastio_ctx), GFP_KERNEL);
     ctx[id]->running_list = ctx[id]->free_list = NULL;
     ctx[id]->df_mask = MAX_DEFERRED_NUM - 1;
-    ctx[id]->comp_task_num = 0;
+    ctx[id]->comp_num = 0;
+    ctx[id]->idle_time = msecs_to_jiffies(DEFAULT_WQ_IDLE_TIME);
 
     for (int i = 0; i < WORKQUEUE_DEFAULT_THREAD_NUMS; i++) {
         ctx[id]->df_head[i] = ctx[id]->df_tail[i] = 0;
@@ -555,6 +583,7 @@ asmlinkage long sys_esca_register(const struct __user pt_regs* regs)
 
     spin_lock_init(&ctx[id]->l_lock);
     spin_lock_init(&ctx[id]->df_lock);
+    spin_lock_init(&ctx[id]->comp_lock);
 
     create_worker_pool(WORKQUEUE_DEFAULT_THREAD_NUMS, id);
 
@@ -590,6 +619,7 @@ static void create_worker_pool(int concurrency, int ctx_id)
         wq_wrk_args[arg_idx]->self = &node->list;
 
         node->status = IDLE;
+        node->cache_comp_num = 0;
         node->task = create_io_thread_ptr(wq_worker, wq_wrk_args[arg_idx], -1);
         spin_lock_init(&node->wrk_lock);
         list_add_tail(&node->list, &ctx[ctx_id]->running_list->list);
@@ -651,7 +681,8 @@ asmlinkage void sys_esca_init_config(const struct __user pt_regs* regs)
     MAX_USR_WORKER = kconfig->max_usr_worker;
     MAX_CPU_NUM = kconfig->max_ker_worker;
     RATIO = (MAX_CPU_NUM / MAX_USR_WORKER);
-    DEFAULT_IDLE_TIME = kconfig->default_idle_time;
+    DEFAULT_MAIN_IDLE_TIME = kconfig->default_main_worker_idle_time;
+    DEFAULT_WQ_IDLE_TIME = kconfig->default_wq_worker_idle_time;
     AFF_OFF = kconfig->affinity_offset;
 
     printk("Localize: %s\n", ESCA_LOCALIZE ? "Enable" : "Disable");
@@ -710,11 +741,11 @@ static void __exit lioo_exit(void)
     on_each_cpu(disable_cycle_counter_el0, NULL, 1);
 #endif
 
-    //kfree(main_wrk_args);
-    //for (int i = 0; i < WORKQUEUE_DEFAULT_THREAD_NUMS; i++)
-    //    kfree(wq_wrk_args[i]);
-    // if(worker_task)
-    //  kthread_stop(worker_task);
+    // kfree(main_wrk_args);
+    // for (int i = 0; i < WORKQUEUE_DEFAULT_THREAD_NUMS; i++)
+    //     kfree(wq_wrk_args[i]);
+    //  if(worker_task)
+    //   kthread_stop(worker_task);
 
     printk("lioo exit\n");
 }

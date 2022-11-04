@@ -7,7 +7,7 @@
 
 #include <stdatomic.h>
 
-#define DEFAULT_CONFIG_PATH "/home/eecheng/Desktop/fastio/esca.conf"
+#define DEFAULT_CONFIG_PATH "/home/eecheng/fastio/esca.conf"
 #define CONFIG_ARG_MAX_BYTES 128
 
 /* Limit */
@@ -50,7 +50,8 @@ typedef struct esca_config {
     int max_table_len;
     int max_usr_worker;
     int max_ker_worker;
-    int default_idle_time;
+    int default_main_worker_idle_time;
+    int default_wq_worker_idle_time;
     int affinity_offset;
 } esca_config_t;
 
@@ -61,7 +62,8 @@ static const esca_config_t default_config
           .max_table_len = 1,
           .max_usr_worker = 1,
           .max_ker_worker = 1,
-          .default_idle_time = 150,
+          .default_main_worker_idle_time = 150,
+          .default_wq_worker_idle_time = 150,
           .affinity_offset = 0
       };
 

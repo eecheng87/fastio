@@ -27,7 +27,8 @@ int MAX_TABLE_LEN;
 int MAX_USR_WORKER;
 int MAX_CPU_NUM;
 int RATIO;
-int DEFAULT_IDLE_TIME;
+int DEFAULT_MAIN_IDLE_TIME;
+int DEFAULT_WQ_IDLE_TIME;
 int AFF_OFF;
 
 /* declare shared table, pin user space addr. to kernel phy. addr by kmap */
@@ -178,7 +179,8 @@ void init_config(esca_config_t* c)
     MAX_USR_WORKER = c->max_usr_worker;
     MAX_CPU_NUM = c->max_ker_worker;
     RATIO = (MAX_CPU_NUM / MAX_USR_WORKER);
-    DEFAULT_IDLE_TIME = c->default_idle_time;
+    DEFAULT_MAIN_IDLE_TIME = c->default_main_worker_idle_time;
+    DEFAULT_WQ_IDLE_TIME = c->default_wq_worker_idle_time;
     AFF_OFF = c->affinity_offset;
 
     printf("\033[0;33m");
@@ -238,8 +240,10 @@ __attribute__((constructor)) static void setup(void)
                 config->max_usr_worker = option.val;
             } else if (strcmp(option.key, "max_ker_worker") == 0) {
                 config->max_ker_worker = option.val;
-            } else if (strcmp(option.key, "default_idle_time") == 0) {
-                config->default_idle_time = option.val;
+            } else if (strcmp(option.key, "default_main_worker_idle_time") == 0) {
+                config->default_main_worker_idle_time = option.val;
+            } else if (strcmp(option.key, "default_wq_worker_idle_time") == 0) {
+                config->default_wq_worker_idle_time = option.val;
             } else if (strcmp(option.key, "affinity_offset") == 0) {
                 config->affinity_offset = option.val;
             } else {
