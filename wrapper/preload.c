@@ -34,8 +34,10 @@ int AFF_OFF;
 /* declare shared table, pin user space addr. to kernel phy. addr by kmap */
 int this_worker_id;
 
+// FIXME: encapsulate
 /* user worker can't touch worker's table in diff. set */
-esca_table_t* table[CPU_NUM_LIMIT];
+esca_table_t* sq[CPU_NUM_LIMIT];
+esca_table_t* cq[CPU_NUM_LIMIT];
 
 void init_worker(int idx)
 {
@@ -58,9 +60,9 @@ void init_worker(int idx)
         /* headers in same set using a same page */
         esca_table_t* header = NULL;
         if (i == idx * RATIO) {
-            header = table[i] = (esca_table_t*)aligned_alloc(pgsize, pgsize);
+            header = sq[i] = (esca_table_t*)aligned_alloc(pgsize, pgsize);
         }
-        table[i] = table[idx * RATIO] + (i - idx * RATIO);
+        sq[i] = sq[idx * RATIO] + (i - idx * RATIO);
 
         /* allocate tables */
         esca_table_entry_t* alloc = (esca_table_entry_t*)aligned_alloc(pgsize, pgsize * MAX_TABLE_LEN);
@@ -74,7 +76,7 @@ void init_worker(int idx)
 
         /* pin table from kernel to user */
         for (int j = 0; j < MAX_TABLE_LEN; j++) {
-            table[i]->user_tables[j] = alloc + j * MAX_TABLE_ENTRY;
+            sq[i]->user_tables[j] = alloc + j * MAX_TABLE_ENTRY;
         }
     }
 
@@ -95,10 +97,10 @@ long batch_start()
     in_segment = 1;
 
     for (int j = i * RATIO; j < i * RATIO + RATIO; j++) {
-        if (esca_unlikely(ESCA_READ_ONCE(table[j]->flags) & ESCA_WORKER_NEED_WAKEUP)) {
-            table[j]->flags |= ESCA_START_WAKEUP;
+        if (esca_unlikely(ESCA_READ_ONCE(sq[j]->flags) & ESCA_WORKER_NEED_WAKEUP)) {
+            sq[j]->flags |= ESCA_START_WAKEUP;
             syscall(__NR_esca_wakeup, j);
-            table[j]->flags &= ~ESCA_START_WAKEUP;
+            sq[j]->flags &= ~ESCA_START_WAKEUP;
         }
     }
 
@@ -127,14 +129,14 @@ void update_index(int idx)
     // avoid overwriting;
     // FIXME: need to consider more -> cross table scenario
     // FIXME: order of the head might be protected by barrier
-    while ((table[idx]->tail_entry + 1 == table[idx]->head_entry) && (table[idx]->tail_table == table[idx]->head_table))
+    while ((sq[idx]->tail_entry + 1 == sq[idx]->head_entry) && (sq[idx]->tail_table == sq[idx]->head_table))
         ;
 
-    if (table[idx]->tail_entry == MAX_TABLE_ENTRY - 1) {
-        table[idx]->tail_entry = 0;
-        table[idx]->tail_table = (table[idx]->tail_table == MAX_TABLE_LEN - 1) ? 0 : table[idx]->tail_table + 1;
+    if (sq[idx]->tail_entry == MAX_TABLE_ENTRY - 1) {
+        sq[idx]->tail_entry = 0;
+        sq[idx]->tail_table = (sq[idx]->tail_table == MAX_TABLE_LEN - 1) ? 0 : sq[idx]->tail_table + 1;
     } else {
-        table[idx]->tail_entry++;
+        sq[idx]->tail_entry++;
     }
 }
 
@@ -151,21 +153,21 @@ ssize_t send(int sockfd, const void* buf, size_t len, int flags)
 
     batch_num++;
 
-    int i = table[idx]->tail_table;
-    int j = table[idx]->tail_entry;
+    int i = sq[idx]->tail_table;
+    int j = sq[idx]->tail_entry;
 
-    table[idx]->user_tables[i][j].sysnum = __ESCA_sendto;
-    table[idx]->user_tables[i][j].nargs = 6;
-    table[idx]->user_tables[i][j].args[0] = sockfd;
-    table[idx]->user_tables[i][j].args[1] = buf;
-    table[idx]->user_tables[i][j].args[2] = len;
-    table[idx]->user_tables[i][j].args[3] = flags;
-    table[idx]->user_tables[i][j].args[4] = NULL;
-    table[idx]->user_tables[i][j].args[5] = 0;
+    sq[idx]->user_tables[i][j].sysnum = __ESCA_sendto;
+    sq[idx]->user_tables[i][j].nargs = 6;
+    sq[idx]->user_tables[i][j].args[0] = sockfd;
+    sq[idx]->user_tables[i][j].args[1] = buf;
+    sq[idx]->user_tables[i][j].args[2] = len;
+    sq[idx]->user_tables[i][j].args[3] = flags;
+    sq[idx]->user_tables[i][j].args[4] = NULL;
+    sq[idx]->user_tables[i][j].args[5] = 0;
 
     update_index(idx);
 
-    esca_smp_store_release(&table[idx]->user_tables[i][j].rstatus, BENTRY_BUSY);
+    esca_smp_store_release(&sq[idx]->user_tables[i][j].rstatus, BENTRY_BUSY);
 
     /* assume success */
     return len;

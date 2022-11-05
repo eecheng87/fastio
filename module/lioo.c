@@ -61,7 +61,7 @@ int main_pid; /* PID of main thread */
 /* declare shared table */
 struct page* table_pinned_pages[CPU_NUM_LIMIT][TABLE_LEN_LIMIT];
 struct page* shared_info_pinned_pages[1];
-esca_table_t* table[CPU_NUM_LIMIT];
+esca_table_t* sq[CPU_NUM_LIMIT];
 
 /* args for creating io_thread */
 esca_wkr_args_t* wq_wrk_args[WORKQUEUE_DEFAULT_THREAD_NUMS];
@@ -260,11 +260,11 @@ static int main_worker(void* arg)
     DEFINE_WAIT(wait);
 
     while (1) {
-        int i = table[cur_cpuid]->head_table;
-        int j = table[cur_cpuid]->head_entry;
+        int i = sq[cur_cpuid]->head_table;
+        int j = sq[cur_cpuid]->head_entry;
         int head_index, tail_index;
 
-        while (smp_load_acquire(&table[cur_cpuid]->tables[i][j].rstatus) == BENTRY_EMPTY) {
+        while (smp_load_acquire(&sq[cur_cpuid]->tables[i][j].rstatus) == BENTRY_EMPTY) {
             if (signal_pending(current)) {
                 printk("detect signal\n");
                 goto main_worker_exit;
@@ -277,34 +277,34 @@ static int main_worker(void* arg)
             }
 
             prepare_to_wait(&worker_wait[cur_cpuid], &wait, TASK_INTERRUPTIBLE);
-            WRITE_ONCE(table[cur_cpuid]->flags, table[cur_cpuid]->flags | ESCA_WORKER_NEED_WAKEUP);
+            WRITE_ONCE(sq[cur_cpuid]->flags, sq[cur_cpuid]->flags | ESCA_WORKER_NEED_WAKEUP);
 
-            if (smp_load_acquire(&table[cur_cpuid]->tables[i][j].rstatus) == BENTRY_EMPTY) {
+            if (smp_load_acquire(&sq[cur_cpuid]->tables[i][j].rstatus) == BENTRY_EMPTY) {
                 schedule();
                 // wake up by `wake_up` in batch_start
                 finish_wait(&worker_wait[cur_cpuid], &wait);
 
                 // clear need_wakeup
                 // FIXME: // need write barrier?
-                WRITE_ONCE(table[cur_cpuid]->flags, table[cur_cpuid]->flags & ~ESCA_WORKER_NEED_WAKEUP);
-                timeout = jiffies + table[cur_cpuid]->idle_time;
+                WRITE_ONCE(sq[cur_cpuid]->flags, sq[cur_cpuid]->flags & ~ESCA_WORKER_NEED_WAKEUP);
+                timeout = jiffies + sq[cur_cpuid]->idle_time;
                 continue;
             }
 
             // condition satisfied, don't schedule
             finish_wait(&worker_wait[cur_cpuid], &wait);
-            WRITE_ONCE(table[cur_cpuid]->flags, table[cur_cpuid]->flags & ~ESCA_WORKER_NEED_WAKEUP);
+            WRITE_ONCE(sq[cur_cpuid]->flags, sq[cur_cpuid]->flags & ~ESCA_WORKER_NEED_WAKEUP);
         }
 
         head_index = (i * MAX_TABLE_ENTRY) + j;
-        tail_index = (table[cur_cpuid]->tail_table * MAX_TABLE_ENTRY) + table[cur_cpuid]->tail_entry;
+        tail_index = (sq[cur_cpuid]->tail_table * MAX_TABLE_ENTRY) + sq[cur_cpuid]->tail_entry;
         should_be_submitted[cur_cpuid] = (tail_index >= head_index)
             ? tail_index - head_index
             : MAX_TABLE_ENTRY * MAX_TABLE_LEN - head_index + tail_index;
         offloaded = 0;
 
         while (should_be_submitted[cur_cpuid] != 0) {
-            esca_table_entry_t* ent = &table[cur_cpuid]->tables[i][j];
+            esca_table_entry_t* ent = &sq[cur_cpuid]->tables[i][j];
 
             // res = indirect_call(syscall_table_ptr[ent->sysnum], ent->nargs, ent->args);
 
@@ -370,11 +370,11 @@ static int main_worker(void* arg)
                 }
             }
 
-            timeout = jiffies + table[cur_cpuid]->idle_time;
+            timeout = jiffies + sq[cur_cpuid]->idle_time;
         }
         cond_resched();
-        table[cur_cpuid]->head_table = i;
-        table[cur_cpuid]->head_entry = j;
+        sq[cur_cpuid]->head_table = i;
+        sq[cur_cpuid]->head_entry = j;
 
         if (signal_pending(current)) {
             printk("detect signal from main_worker\n");
@@ -518,11 +518,11 @@ asmlinkage long sys_esca_register(const struct __user pt_regs* regs)
 
         esca_table_t* header = (esca_table_t*)kmap(shared_info_pinned_pages[0]);
         for (int i = id; i < id + RATIO; i++) {
-            table[i] = header + i - id;
+            sq[i] = header + i - id;
         }
     } else {
         /* make sure header has been register */
-        while (!table[id]) {
+        while (!sq[id]) {
             cond_resched();
         }
     }
@@ -534,27 +534,27 @@ asmlinkage long sys_esca_register(const struct __user pt_regs* regs)
     printk("Pin %d pages in worker %d\n", n_page, id);
 
     for (int j = 0; j < MAX_TABLE_LEN; j++) {
-        table[id]->tables[j] = (esca_table_entry_t*)kmap(table_pinned_pages[id][j]);
-        printk("table[%d][%d]=%p\n", id, j, table[id]->tables[j]);
+        sq[id]->tables[j] = (esca_table_entry_t*)kmap(table_pinned_pages[id][j]);
+        printk("sq[%d][%d]=%p\n", id, j, sq[id]->tables[j]);
     }
 
     /* initial entry status */
     for (int j = 0; j < MAX_TABLE_LEN; j++)
         for (int k = 0; k < MAX_TABLE_ENTRY; k++)
-            table[id]->tables[j][k].rstatus = BENTRY_EMPTY;
+            sq[id]->tables[j][k].rstatus = BENTRY_EMPTY;
 
     for (int i = 0; i < CPU_NUM_LIMIT; i++) {
         worker_task[i] = NULL;
     }
 
     // TODO: merge them
-    table[id]->head_table = table[id]->tail_table = 0;
-    table[id]->head_entry = table[id]->tail_entry = 0;
+    sq[id]->head_table = sq[id]->tail_table = 0;
+    sq[id]->head_entry = sq[id]->tail_entry = 0;
 
     // TODO: merge them
     should_be_submitted[id] = 0;
-    table[id]->flags = 0 | ESCA_WORKER_NEED_WAKEUP;
-    table[id]->idle_time = msecs_to_jiffies(DEFAULT_MAIN_IDLE_TIME);
+    sq[id]->flags = 0 | ESCA_WORKER_NEED_WAKEUP;
+    sq[id]->idle_time = msecs_to_jiffies(DEFAULT_MAIN_IDLE_TIME);
     init_waitqueue_head(&worker_wait[id]);
 
     // setup main offloading-thread
@@ -641,7 +641,7 @@ asmlinkage void sys_esca_wakeup(const struct __user pt_regs* regs)
     int i = regs->regs[0];
 #endif
 
-    if (likely(READ_ONCE(table[i]->flags) & ESCA_START_WAKEUP)) {
+    if (likely(READ_ONCE(sq[i]->flags) & ESCA_START_WAKEUP)) {
         wake_up(&worker_wait[i]);
     }
 }
