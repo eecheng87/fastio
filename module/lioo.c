@@ -361,11 +361,11 @@ static int main_worker(void* arg)
                     }
                 }
                 if (done == 1) {
-                    while (ctx[cur_cpuid]->comp_num != offloaded) {
+                    // FIXME: try to use the logic `ctx[cur_cpuid]->comp_num != offloaded`
+                    while (list_empty(&ctx[cur_cpuid]->running_list->list)) {
                         cond_resched();
                     }
-                    // don't need lock since no possible update in this moment
-                    ctx[cur_cpuid]->comp_num = 0;
+
                     wake_up_interruptible(&wq[cur_cpuid]);
                 }
             }
@@ -420,12 +420,6 @@ static int wq_worker(void* arg)
 
             // force to sleep in first-entrance
             if (!time_after(jiffies, timeout)) {
-                if (work_node_reg[wq_wrk_id]->cache_comp_num != 0) {
-                    spin_lock_irq(&ctx[ctx_id]->comp_lock);
-                    ctx[ctx_id]->comp_num += work_node_reg[wq_wrk_id]->cache_comp_num;
-                    spin_unlock_irq(&ctx[ctx_id]->comp_lock);
-                    work_node_reg[wq_wrk_id]->cache_comp_num = 0;
-                }
                 cond_resched();
                 continue;
             }
@@ -438,9 +432,9 @@ static int wq_worker(void* arg)
         do {
             ret = indirect_call(syscall_table_ptr[ent->sysnum], ent->nargs, ent->args);
 
-#if 1
+#if 0
             printk(KERN_INFO "In wq-%d, do syscall %d : %d = (%d, %d, %ld, %d) at cpu%d\n", wq_wrk_id,
-                ent->sysnum, ent->sysret, ent->args[0], ent->args[1], ent->args[2], ent->args[3], smp_processor_id());
+                ent->sysnum, ret, ent->args[0], ent->args[1], ent->args[2], ent->args[3], smp_processor_id());
 #endif
 
             if (ret != -EAGAIN)
@@ -476,7 +470,9 @@ static int wq_worker(void* arg)
         prepare_to_wait(&wq_worker_wq[wq_wrk_id], &wq_wait, TASK_INTERRUPTIBLE);
 
         smp_store_release(&work_node_reg[wq_wrk_id]->status, IDLE);
-
+        spin_lock_irq(&ctx[ctx_id]->comp_lock);
+        printk("in wq-%d, comp_num=%d\n", wq_wrk_id, ctx[ctx_id]->comp_num);
+        spin_unlock_irq(&ctx[ctx_id]->comp_lock);
         schedule();
 
         // wake up by main_worker
