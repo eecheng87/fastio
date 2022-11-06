@@ -61,7 +61,9 @@ int main_pid; /* PID of main thread */
 /* declare shared table */
 struct page* table_pinned_pages[CPU_NUM_LIMIT][TABLE_LEN_LIMIT];
 struct page* shared_info_pinned_pages[1];
+
 esca_table_t* sq[CPU_NUM_LIMIT];
+esca_table_t* cq[CPU_NUM_LIMIT];
 
 /* args for creating io_thread */
 esca_wkr_args_t* wq_wrk_args[WORKQUEUE_DEFAULT_THREAD_NUMS];
@@ -504,25 +506,25 @@ asmlinkage long sys_esca_register(const struct __user pt_regs* regs)
 #endif
 
     // FIXME: check if p1[0] is needed
-    struct file* file;
-    int n_page, id = p1[2], fd, set_index = p1[3];
+    int n_page, id = p1[2], reg_type = p1[3];
 
     // FIXME: release
     esca_wkr_args_t* main_wrk_args = (esca_wkr_args_t*)kmalloc(sizeof(esca_wkr_args_t), GFP_KERNEL);
     main_wrk_args->ctx_id = id;
 
+    esca_table_t** Q = (reg_type == REG_SQ) ? sq : cq;
+
     if (p1[0]) {
         /* header is not null */
-        n_page = get_user_pages((unsigned long)(p1[0]), 1, FOLL_FORCE | FOLL_WRITE,
-            shared_info_pinned_pages, NULL);
+        get_user_pages((unsigned long)(p1[0]), 1, FOLL_FORCE | FOLL_WRITE, shared_info_pinned_pages, NULL);
 
         esca_table_t* header = (esca_table_t*)kmap(shared_info_pinned_pages[0]);
         for (int i = id; i < id + RATIO; i++) {
-            sq[i] = header + i - id;
+            Q[i] = header + i - id;
         }
     } else {
         /* make sure header has been register */
-        while (!sq[id]) {
+        while (!Q[id]) {
             cond_resched();
         }
     }
@@ -531,37 +533,37 @@ asmlinkage long sys_esca_register(const struct __user pt_regs* regs)
     n_page = get_user_pages((unsigned long)(p1[1]), MAX_TABLE_LEN,
         FOLL_FORCE | FOLL_WRITE, table_pinned_pages[id],
         NULL);
-    printk("Pin %d pages in worker %d\n", n_page, id);
+    printk("Pin %d pages in worker-%d, for %s registration\n", n_page, id, (reg_type == REG_SQ) ? "SQ" : "CQ");
 
     for (int j = 0; j < MAX_TABLE_LEN; j++) {
-        sq[id]->tables[j] = (esca_table_entry_t*)kmap(table_pinned_pages[id][j]);
-        printk("sq[%d][%d]=%p\n", id, j, sq[id]->tables[j]);
+        Q[id]->tables[j] = (esca_table_entry_t*)kmap(table_pinned_pages[id][j]);
+        printk("Q[%d][%d]=%p\n", id, j, Q[id]->tables[j]);
     }
 
     /* initial entry status */
     for (int j = 0; j < MAX_TABLE_LEN; j++)
         for (int k = 0; k < MAX_TABLE_ENTRY; k++)
-            sq[id]->tables[j][k].rstatus = BENTRY_EMPTY;
+            Q[id]->tables[j][k].rstatus = BENTRY_EMPTY;
+
+    Q[id]->head_table = Q[id]->tail_table = 0;
+    Q[id]->head_entry = Q[id]->tail_entry = 0;
+    Q[id]->flags = 0 | ESCA_WORKER_NEED_WAKEUP;
+    Q[id]->idle_time = msecs_to_jiffies(DEFAULT_MAIN_IDLE_TIME);
+
+    if (reg_type == REG_CQ)
+        return 0;
 
     for (int i = 0; i < CPU_NUM_LIMIT; i++) {
         worker_task[i] = NULL;
     }
 
-    // TODO: merge them
-    sq[id]->head_table = sq[id]->tail_table = 0;
-    sq[id]->head_entry = sq[id]->tail_entry = 0;
-
-    // TODO: merge them
-    should_be_submitted[id] = 0;
-    sq[id]->flags = 0 | ESCA_WORKER_NEED_WAKEUP;
-    sq[id]->idle_time = msecs_to_jiffies(DEFAULT_MAIN_IDLE_TIME);
     init_waitqueue_head(&worker_wait[id]);
 
     // setup main offloading-thread
     worker_task[id] = create_io_thread_ptr(main_worker, main_wrk_args, -1);
 
     // setup context of fastio
-
+    should_be_submitted[id] = 0;
     ctx[id] = kmalloc(sizeof(struct fastio_ctx), GFP_KERNEL);
     ctx[id]->running_list = ctx[id]->free_list = NULL;
     ctx[id]->df_mask = MAX_DEFERRED_NUM - 1;

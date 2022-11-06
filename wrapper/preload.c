@@ -55,28 +55,35 @@ void init_worker(int idx)
         goto init_worker_exit;
     }
 
-    int set_index = 0;
     for (int i = idx * RATIO; i < idx * RATIO + RATIO; i++) {
         /* headers in same set using a same page */
-        esca_table_t* header = NULL;
+        esca_table_t* sq_header = NULL;
+        esca_table_t* cq_header = NULL;
+
         if (i == idx * RATIO) {
-            header = sq[i] = (esca_table_t*)aligned_alloc(pgsize, pgsize);
+            sq_header = sq[i] = (esca_table_t*)aligned_alloc(pgsize, pgsize);
+            cq_header = cq[i] = (esca_table_t*)aligned_alloc(pgsize, pgsize);
         }
         sq[i] = sq[idx * RATIO] + (i - idx * RATIO);
+        cq[i] = cq[idx * RATIO] + (i - idx * RATIO);
 
         /* allocate tables */
-        esca_table_entry_t* alloc = (esca_table_entry_t*)aligned_alloc(pgsize, pgsize * MAX_TABLE_LEN);
-        if (!alloc) {
+        esca_table_entry_t* alloc_sq = (esca_table_entry_t*)aligned_alloc(pgsize, pgsize * MAX_TABLE_LEN);
+        esca_table_entry_t* alloc_cq = (esca_table_entry_t*)aligned_alloc(pgsize, pgsize * MAX_TABLE_LEN);
+
+        if (!alloc_sq || !alloc_cq) {
             printf("[ERROR] alloc failed\n");
             goto init_worker_exit;
         }
 
         /* pin tables to kernel */
-        syscall(__NR_esca_register, header, alloc, i, set_index++);
+        syscall(__NR_esca_register, sq_header, alloc_sq, i, REG_SQ);
+        syscall(__NR_esca_register, cq_header, alloc_cq, i, REG_CQ);
 
         /* pin table from kernel to user */
         for (int j = 0; j < MAX_TABLE_LEN; j++) {
-            sq[i]->user_tables[j] = alloc + j * MAX_TABLE_ENTRY;
+            sq[i]->user_tables[j] = alloc_sq + j * MAX_TABLE_ENTRY;
+            cq[i]->user_tables[j] = alloc_cq + j * MAX_TABLE_ENTRY;
         }
     }
 
