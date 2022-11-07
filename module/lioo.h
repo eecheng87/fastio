@@ -11,6 +11,7 @@
 #define TABLE_ENT_LIMIT 64
 #define WORKQUEUE_DEFAULT_THREAD_NUMS 4
 #define MAX_DEFERRED_NUM 256
+#define MAX_OFFLOADED 2048
 
 /* define flags */
 #define ESCA_WORKER_NEED_WAKEUP (1U << 1)
@@ -82,6 +83,7 @@ struct fastio_work_meta {
 
 struct fastio_ctx {
     spinlock_t l_lock;
+    spinlock_t cq_lock;
     spinlock_t df_lock;
     spinlock_t comp_lock;
     int df_mask; /* MAX_DEFERRED_NUM - 1 */

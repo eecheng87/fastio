@@ -81,3 +81,5 @@ typedef long (*sendmsg_t)(int sockfd, const struct msghdr* msg, int flags);
 sendmsg_t real_sendmsg;
 typedef long (*send_t)(int sockfd, const void* buf, size_t len, int flags);
 send_t real_send;
+typedef long (*accept4_t)(int sockfd, struct sockaddr* addr, socklen_t* addrlen, int flags);
+accept4_t real_accept4;

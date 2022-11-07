@@ -114,16 +114,33 @@ long batch_start()
     return 0;
 }
 
-long batch_flush()
+void peek_main_worker()
 {
-    in_segment = 0;
+    int i = this_worker_id;
+
+    for (int j = i * RATIO; j < i * RATIO + RATIO; j++) {
+        if (esca_unlikely(ESCA_READ_ONCE(sq[j]->flags) & ESCA_WORKER_NEED_WAKEUP)) {
+            sq[j]->flags |= ESCA_START_WAKEUP;
+            syscall(__NR_esca_wakeup, j);
+            sq[j]->flags &= ~ESCA_START_WAKEUP;
+        }
+    }
+}
+
+long batch_flush_and_wait_some(int num)
+{
     if (batch_num == 0)
         return 0;
 
-    syscall(__NR_esca_wait, this_worker_id * RATIO);
+    syscall(__NR_esca_wait, this_worker_id * RATIO, num);
     batch_num = 0;
 
     return 0;
+}
+
+long batch_flush()
+{
+    return batch_flush_and_wait_some(-1);
 }
 
 void toggle_region()
@@ -131,54 +148,47 @@ void toggle_region()
     in_segment ^= 1;
 }
 
-void update_index(int idx)
+void update_tail(esca_table_t* T)
 {
     // avoid overwriting;
     // FIXME: need to consider more -> cross table scenario
     // FIXME: order of the head might be protected by barrier
-    while ((sq[idx]->tail_entry + 1 == sq[idx]->head_entry) && (sq[idx]->tail_table == sq[idx]->head_table))
+
+    while ((T->tail_entry + 1 == T->head_entry) && (T->tail_table == T->head_table))
         ;
 
-    if (sq[idx]->tail_entry == MAX_TABLE_ENTRY - 1) {
-        sq[idx]->tail_entry = 0;
-        sq[idx]->tail_table = (sq[idx]->tail_table == MAX_TABLE_LEN - 1) ? 0 : sq[idx]->tail_table + 1;
+    if (T->tail_entry == MAX_TABLE_ENTRY - 1) {
+        T->tail_entry = 0;
+        T->tail_table = (T->tail_table == MAX_TABLE_LEN - 1) ? 0 : T->tail_table + 1;
     } else {
-        sq[idx]->tail_entry++;
+        T->tail_entry++;
     }
 }
 
-#include <sys/socket.h>
-ssize_t send(int sockfd, const void* buf, size_t len, int flags)
+void update_head(esca_table_t* T)
 {
-#if 1
-    if (!in_segment) {
-        return real_send(sockfd, buf, len, flags);
+    // FIXME: what to do when there is no available cqe
+    while ((T->head_entry == T->tail_entry) && (T->head_table == T->head_table))
+        ;
+
+    if (T->head_entry == MAX_TABLE_ENTRY - 1) {
+        T->head_entry = 0;
+        T->head_table = (T->head_table == MAX_TABLE_LEN - 1) ? 0 : T->head_table + 1;
+    } else {
+        T->head_entry++;
     }
-#endif
-
-    int idx = this_worker_id * RATIO + (sockfd % RATIO);
-
-    batch_num++;
-
-    int i = sq[idx]->tail_table;
-    int j = sq[idx]->tail_entry;
-
-    sq[idx]->user_tables[i][j].sysnum = __ESCA_sendto;
-    sq[idx]->user_tables[i][j].nargs = 6;
-    sq[idx]->user_tables[i][j].args[0] = sockfd;
-    sq[idx]->user_tables[i][j].args[1] = buf;
-    sq[idx]->user_tables[i][j].args[2] = len;
-    sq[idx]->user_tables[i][j].args[3] = flags;
-    sq[idx]->user_tables[i][j].args[4] = NULL;
-    sq[idx]->user_tables[i][j].args[5] = 0;
-
-    update_index(idx);
-
-    esca_smp_store_release(&sq[idx]->user_tables[i][j].rstatus, BENTRY_BUSY);
-
-    /* assume success */
-    return len;
 }
+
+esca_table_entry_t* get_next_cqe()
+{
+    int i = this_worker_id;
+    esca_table_entry_t* res = &cq[i]->user_tables[cq[i]->head_table][cq[i]->head_entry];
+
+    update_head(cq[i]);
+    return res;
+}
+
+#include "echo.c"
 
 void init_config(esca_config_t* c)
 {
@@ -221,6 +231,7 @@ __attribute__((constructor)) static void setup(void)
     real_sendfile = real_sendfile ? real_sendfile : dlsym(RTLD_NEXT, "sendfile");
     real_sendmsg = real_sendmsg ? real_sendmsg : dlsym(RTLD_NEXT, "sendmsg");
     real_send = real_send ? real_send : dlsym(RTLD_NEXT, "send");
+    real_accept4 = real_accept4 ? real_accept4 : dlsym(RTLD_NEXT, "accept4");
 
     /* configuration */
     config = malloc(sizeof(esca_config_t));
