@@ -31,6 +31,8 @@ int DEFAULT_MAIN_IDLE_TIME;
 int DEFAULT_WQ_IDLE_TIME;
 int AFF_OFF;
 
+esca_config_t* config;
+
 /* declare shared table, pin user space addr. to kernel phy. addr by kmap */
 int this_worker_id;
 
@@ -129,13 +131,11 @@ void peek_main_worker()
 
 long batch_flush_and_wait_some(int num)
 {
-    if (batch_num == 0)
-        return 0;
-
-    syscall(__NR_esca_wait, this_worker_id * RATIO, num);
+    printf("enter batch_flush_and_wait_some\n");
+    int ret = syscall(__NR_esca_wait, this_worker_id * RATIO, num);
     batch_num = 0;
-
-    return 0;
+    printf("return from batch_flush_and_wait_some, ret=%d\n", ret);
+    return ret;
 }
 
 long batch_flush()
@@ -167,10 +167,7 @@ void update_tail(esca_table_t* T)
 
 void update_head(esca_table_t* T)
 {
-    // FIXME: what to do when there is no available cqe
-    while ((T->head_entry == T->tail_entry) && (T->head_table == T->head_table))
-        ;
-
+    // caller need to guarantee that there is available cqe
     if (T->head_entry == MAX_TABLE_ENTRY - 1) {
         T->head_entry = 0;
         T->head_table = (T->head_table == MAX_TABLE_LEN - 1) ? 0 : T->head_table + 1;
@@ -183,6 +180,11 @@ esca_table_entry_t* get_next_cqe()
 {
     int i = this_worker_id;
     esca_table_entry_t* res = &cq[i]->user_tables[cq[i]->head_table][cq[i]->head_entry];
+    printf("retrieve cq[%d][%d], status=%d\n",cq[i]->head_table,cq[i]->head_entry,res->rstatus);
+    if (esca_smp_load_acquire(&res->rstatus) == BENTRY_EMPTY)
+        return NULL;
+
+    res->rstatus = BENTRY_EMPTY;
 
     update_head(cq[i]);
     return res;
@@ -215,7 +217,8 @@ void init_config(esca_config_t* c)
     printf("\033[0m");
 }
 
-__attribute__((constructor)) static void setup(void)
+//__attribute__((constructor))
+void fastio_user_setup(void)
 {
     FILE* fp;
     main_pid = getpid();

@@ -234,10 +234,13 @@ static void disable_cycle_counter_el0(void* data)
 static void fill_cqe(int ctx_id, esca_table_entry_t* ent)
 {
     int cq_i, cq_j;
+    esca_table_entry_t* dest;
 
     spin_lock_irq(&ctx[ctx_id]->cq_lock);
     cq_i = cq[ctx_id]->tail_table;
     cq_j = cq[ctx_id]->tail_entry;
+
+    dest = &cq[ctx_id]->tables[cq_i][cq_j];
 
     if (cq_j == MAX_TABLE_ENTRY - 1) {
         cq_i = (cq_i == MAX_TABLE_LEN - 1) ? 0 : cq_i + 1;
@@ -251,7 +254,7 @@ static void fill_cqe(int ctx_id, esca_table_entry_t* ent)
 
     spin_unlock_irq(&ctx[ctx_id]->cq_lock);
 
-    esca_table_entry_t* dest = &cq[ctx_id]->tables[cq_i][cq_j];
+
     dest->sysret = ent->sysret;
     dest->sysnum = ent->sysnum;
 
@@ -279,10 +282,11 @@ static void copy_table_entry_and_advance(int ctx_idx, int wrk_idx, esca_table_en
 
 static int get_ready_qlen(esca_table_t* T)
 {
-    int head_index, tail_index, i = T->head_table, j = T->head_entry;
+    int head_index, tail_index;
 
-    head_index = (i * MAX_TABLE_ENTRY) + j;
+    head_index = (T->head_table * MAX_TABLE_ENTRY) + T->head_entry;
     tail_index = (T->tail_table * MAX_TABLE_ENTRY) + T->tail_entry;
+
     return (tail_index >= head_index) ? tail_index - head_index : MAX_TABLE_ENTRY * MAX_TABLE_LEN - head_index + tail_index;
 }
 
@@ -301,7 +305,6 @@ static int main_worker(void* arg)
     printk("In main-worker, pid = %d, bound at cpu %d, cur_cpupid = %d\n",
         current->pid, smp_processor_id(), cur_cpuid);
 
-    init_waitqueue_head(&wq[cur_cpuid]);
     DEFINE_WAIT(wait);
 
     while (1) {
@@ -341,12 +344,12 @@ static int main_worker(void* arg)
         }
 
         should_be_submitted[cur_cpuid] = get_ready_qlen(sq[cur_cpuid]);
-
+        printk("should be submitted = %d\n", should_be_submitted[cur_cpuid]);
         while (should_be_submitted[cur_cpuid] != 0) {
             esca_table_entry_t* ent = &sq[cur_cpuid]->tables[i][j];
 
             res = indirect_call(syscall_table_ptr[ent->sysnum], ent->nargs, ent->args);
-
+            printk("res = %d\n", res);
             if (res == -EAGAIN) {
 
                 // TODO: choose arg. depending on syscall
@@ -374,14 +377,18 @@ static int main_worker(void* arg)
                     wake_up(&wq_worker_wq[hash]);
                 }
             } else {
+                offloaded++;
                 ent->sysret = res;
                 fill_cqe(cur_cpuid, ent);
-                // FIXME: update comp_num
-            }
-#if 0
+
+                spin_lock_irq(&ctx[cur_cpuid]->comp_lock);
+                ctx[cur_cpuid]->comp_num++;
+                spin_unlock_irq(&ctx[cur_cpuid]->comp_lock);
+#if 1
                 printk(KERN_INFO "Index %d,%d do syscall %d : %d = (%d, %d, %ld, %d) at cpu%d\n", i, j,
-                    ent->sysnum, ent->sysret, ent->args[0], ent->args[1], ent->args[2], ent->args[3], smp_processor_id());
+                    ent->sysnum, res, ent->args[0], ent->args[1], ent->args[2], ent->args[3], smp_processor_id());
 #endif
+            }
 
             // FIXME: need barrier?
             ent->rstatus = BENTRY_EMPTY;
@@ -404,6 +411,7 @@ static int main_worker(void* arg)
                         break;
                     }
                 }
+                printk("threshold=%d, mini_ret=%d, offloaded=%d, done=%d\n", threshold, mini_ret, offloaded, done);
                 if (done == 1) {
                     while (ctx[cur_cpuid]->comp_num < threshold) {
                         cond_resched();
@@ -420,6 +428,9 @@ static int main_worker(void* arg)
                         offloaded = 0;
                     mini_ret = -1;
 
+                    printk("wakeup user[%d], remaining offloaded = %d\n", cur_cpuid, offloaded);
+                    smp_store_release(&ctx[cur_cpuid]->status,  ctx[cur_cpuid]->status |= CTX_FLAGS_MAIN_DONE);
+                    //smp_mb();
                     wake_up_interruptible(&wq[cur_cpuid]);
                 }
             }
@@ -491,17 +502,15 @@ static int wq_worker(void* arg)
         do {
             ret = indirect_call(syscall_table_ptr[ent->sysnum], ent->nargs, ent->args);
 
-#if 1
-            printk(KERN_INFO "In wq-%d, do syscall %d : %d = (%d, %d, %ld, %d) at cpu%d\n", wq_wrk_id,
-                ent->sysnum, ret, ent->args[0], ent->args[1], ent->args[2], ent->args[3], smp_processor_id());
-#endif
-
             if (ret != -EAGAIN)
                 break;
             cond_resched();
             // FIXME: update cache_comp_num?
         } while (1);
-
+#if 1
+        printk(KERN_INFO "In wq-%d, do syscall %d : %d = (%d, %d, %ld, %d) at cpu%d\n", wq_wrk_id,
+            ent->sysnum, ret, ent->args[0], ent->args[1], ent->args[2], ent->args[3], smp_processor_id());
+#endif
         // updating CQ
         ent->sysret = ret;
         fill_cqe(ctx_id, ent);
@@ -617,6 +626,9 @@ asmlinkage long sys_esca_register(const struct __user pt_regs* regs)
     }
 
     init_waitqueue_head(&worker_wait[id]);
+    init_waitqueue_head(&wq[id]);
+    // FIXME: should forward the initialization of `wq_worker_wq`?
+
 
     // setup main offloading-thread
     worker_task[id] = create_io_thread_ptr(main_worker, main_wrk_args, -1);
@@ -627,6 +639,7 @@ asmlinkage long sys_esca_register(const struct __user pt_regs* regs)
     ctx[id]->running_list = ctx[id]->free_list = NULL;
     ctx[id]->df_mask = MAX_DEFERRED_NUM - 1;
     ctx[id]->comp_num = 0;
+    ctx[id]->status = 0;
     ctx[id]->idle_time = msecs_to_jiffies(DEFAULT_WQ_IDLE_TIME);
 
     for (int i = 0; i < WORKQUEUE_DEFAULT_THREAD_NUMS; i++) {
@@ -717,8 +730,24 @@ asmlinkage long sys_esca_wait(const struct __user pt_regs* regs)
     int idx = regs->regs[0];
     mini_ret = regs->regs[1];
 #endif
-    wait_event_interruptible(wq[idx], 1);
 
+    DEFINE_WAIT(_tmp_wait);
+
+    for(;;){
+        prepare_to_wait(&wq[idx], &_tmp_wait, TASK_INTERRUPTIBLE);
+        if(smp_load_acquire(&ctx[idx]->status) & CTX_FLAGS_MAIN_DONE)
+            break;
+        if(!signal_pending(current)){
+            schedule();
+            continue;
+        }
+        break;
+    }
+    finish_wait(&wq[idx], &_tmp_wait);
+
+    //smp_mb();
+    ctx[idx]->status &= ~CTX_FLAGS_MAIN_DONE;
+    printk("return from wait\n");
     return get_ready_qlen(cq[idx]);
 }
 

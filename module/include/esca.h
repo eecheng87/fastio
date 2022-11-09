@@ -39,7 +39,7 @@
 #define esca_likely(cond) __builtin_expect(!!(cond), 1)
 #endif
 
-esca_config_t* config;
+extern esca_config_t* config;
 
 /* define flags */
 #define ESCA_WORKER_NEED_WAKEUP (1U << 1)

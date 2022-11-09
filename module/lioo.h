@@ -17,6 +17,9 @@
 #define ESCA_WORKER_NEED_WAKEUP (1U << 1)
 #define ESCA_START_WAKEUP (1U << 2)
 
+/* flags for context */
+#define CTX_FLAGS_MAIN_DONE (1U << 1)
+
 #include "config.h"
 
 typedef struct esca_table_entry {
@@ -91,6 +94,7 @@ struct fastio_ctx {
     int df_tail[WORKQUEUE_DEFAULT_THREAD_NUMS]; /* to be post */
     int comp_num;
     unsigned idle_time; // in jiffies
+    int status;
     struct fastio_work_meta* running_list;
     struct fastio_work_meta* free_list;
     esca_table_entry_t deferred_list[WORKQUEUE_DEFAULT_THREAD_NUMS][MAX_DEFERRED_NUM];

@@ -1,3 +1,6 @@
+#ifndef _PRELOAD_H
+#define _PRELOAD_H
+
 #define _GNU_SOURCE
 
 #define DEPLOY_TAGET 1
@@ -83,3 +86,5 @@ typedef long (*send_t)(int sockfd, const void* buf, size_t len, int flags);
 send_t real_send;
 typedef long (*accept4_t)(int sockfd, struct sockaddr* addr, socklen_t* addrlen, int flags);
 accept4_t real_accept4;
+
+#endif
