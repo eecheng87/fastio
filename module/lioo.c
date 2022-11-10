@@ -418,9 +418,11 @@ static int main_worker(void* arg)
                     while (ctx[cur_cpuid]->comp_num < threshold) {
                         cond_resched();
 
-                        if (get_ready_qlen(sq[cur_cpuid]) > 0) {
+                        if (get_ready_qlen(sq[cur_cpuid]) > 0)
                             goto submitted_again;
-                        }
+
+                        if (signal_pending(current))
+                            goto main_worker_exit;
                     }
                     // FIXME: is lock needed?
                     spin_lock_irq(&ctx[cur_cpuid]->comp_lock);
@@ -508,7 +510,12 @@ static int wq_worker(void* arg)
 
             if (ret != -EAGAIN)
                 break;
+
             cond_resched();
+
+            if (signal_pending(current))
+                goto wq_worker_exit;
+
             // FIXME: update cache_comp_num?
         } while (1);
 #if 1
