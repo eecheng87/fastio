@@ -76,3 +76,25 @@ ssize_t send(int sockfd, const void* buf, size_t len, int flags)
     /* assume success */
     return len;
 }
+
+int close(int sockfd)
+{
+    int idx = this_worker_id * RATIO + (sockfd % RATIO);
+    peek_main_worker();
+
+    batch_num++;
+
+    int i = sq[idx]->tail_table;
+    int j = sq[idx]->tail_entry;
+
+    sq[idx]->user_tables[i][j].sysnum = __ESCA_close;
+    sq[idx]->user_tables[i][j].nargs = 1;
+    sq[idx]->user_tables[i][j].args[0] = sockfd;
+
+    update_tail(sq[idx]);
+
+    esca_smp_store_release(&sq[idx]->user_tables[i][j].rstatus, BENTRY_BUSY);
+
+    /* assume success */
+    return 0;
+}

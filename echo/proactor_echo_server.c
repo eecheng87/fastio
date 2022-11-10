@@ -115,9 +115,9 @@ int main(int argc, char* argv[])
             case __ESCA_read:
                 res = cqe->sysret;
                 printf("in read state, res = %d\n", res);
-                if (res < 0) {
+                if (res <= 0) {
                     printf("Read error on file descriptor %ld\n", cqe->args[0]);
-                    // FIXME: what is the next state, `close`?
+                    close(cqe->args[0]);
                 } else {
                     send(cqe->args[0], cqe->args[1], res, 0);
                 }
