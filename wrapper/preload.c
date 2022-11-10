@@ -180,7 +180,7 @@ esca_table_entry_t* get_next_cqe()
 {
     int i = this_worker_id;
     esca_table_entry_t* res = &cq[i]->user_tables[cq[i]->head_table][cq[i]->head_entry];
-    printf("retrieve cq[%d][%d], status=%d\n",cq[i]->head_table,cq[i]->head_entry,res->rstatus);
+    printf("retrieve cq[%d][%d], status=%d\n", cq[i]->head_table, cq[i]->head_entry, res->rstatus);
     if (esca_smp_load_acquire(&res->rstatus) == BENTRY_EMPTY)
         return NULL;
 

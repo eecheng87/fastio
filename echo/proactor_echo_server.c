@@ -99,7 +99,7 @@ int main(int argc, char* argv[])
             if (!cqe) {
                 continue;
             }
-printf("sysnum=%d\n", cqe->sysnum);
+            printf("sys[%d](%d,%d,%d)\n", cqe->sysnum, cqe->args[0], cqe->args[1], cqe->args[2]);
             switch (cqe->sysnum) {
             case __ESCA_accept4:
                 int cq_fd = cqe->sysret;

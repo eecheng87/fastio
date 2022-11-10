@@ -254,7 +254,6 @@ static void fill_cqe(int ctx_id, esca_table_entry_t* ent)
 
     spin_unlock_irq(&ctx[ctx_id]->cq_lock);
 
-
     dest->sysret = ent->sysret;
     dest->sysnum = ent->sysnum;
 
@@ -343,15 +342,16 @@ static int main_worker(void* arg)
             WRITE_ONCE(sq[cur_cpuid]->flags, sq[cur_cpuid]->flags & ~ESCA_WORKER_NEED_WAKEUP);
         }
 
+    submitted_again:
         should_be_submitted[cur_cpuid] = get_ready_qlen(sq[cur_cpuid]);
         printk("should be submitted = %d\n", should_be_submitted[cur_cpuid]);
         while (should_be_submitted[cur_cpuid] != 0) {
             esca_table_entry_t* ent = &sq[cur_cpuid]->tables[i][j];
 
             res = indirect_call(syscall_table_ptr[ent->sysnum], ent->nargs, ent->args);
-            printk("res = %d\n", res);
-            if (res == -EAGAIN) {
 
+            if (res == -EAGAIN) {
+                printk("Do syscall-%d, fd is %d, resource is not available now...\n", ent->sysnum, ent->args[0]);
                 // TODO: choose arg. depending on syscall
                 int hash = ent->args[0] & (WORKQUEUE_DEFAULT_THREAD_NUMS - 1);
                 offloaded++;
@@ -413,8 +413,14 @@ static int main_worker(void* arg)
                 }
                 printk("threshold=%d, mini_ret=%d, offloaded=%d, done=%d\n", threshold, mini_ret, offloaded, done);
                 if (done == 1) {
+                    sq[cur_cpuid]->head_table = i;
+                    sq[cur_cpuid]->head_entry = j;
                     while (ctx[cur_cpuid]->comp_num < threshold) {
                         cond_resched();
+
+                        if (get_ready_qlen(sq[cur_cpuid]) > 0) {
+                            goto submitted_again;
+                        }
                     }
                     // FIXME: is lock needed?
                     spin_lock_irq(&ctx[cur_cpuid]->comp_lock);
@@ -429,8 +435,8 @@ static int main_worker(void* arg)
                     mini_ret = -1;
 
                     printk("wakeup user[%d], remaining offloaded = %d\n", cur_cpuid, offloaded);
-                    smp_store_release(&ctx[cur_cpuid]->status,  ctx[cur_cpuid]->status |= CTX_FLAGS_MAIN_DONE);
-                    //smp_mb();
+                    smp_store_release(&ctx[cur_cpuid]->status, ctx[cur_cpuid]->status |= CTX_FLAGS_MAIN_DONE);
+                    // smp_mb();
                     wake_up_interruptible(&wq[cur_cpuid]);
                 }
             }
@@ -438,8 +444,6 @@ static int main_worker(void* arg)
             timeout = jiffies + sq[cur_cpuid]->idle_time;
         }
         cond_resched();
-        sq[cur_cpuid]->head_table = i;
-        sq[cur_cpuid]->head_entry = j;
 
         if (signal_pending(current)) {
             printk("detect signal from main_worker\n");
@@ -629,7 +633,6 @@ asmlinkage long sys_esca_register(const struct __user pt_regs* regs)
     init_waitqueue_head(&wq[id]);
     // FIXME: should forward the initialization of `wq_worker_wq`?
 
-
     // setup main offloading-thread
     worker_task[id] = create_io_thread_ptr(main_worker, main_wrk_args, -1);
 
@@ -733,11 +736,11 @@ asmlinkage long sys_esca_wait(const struct __user pt_regs* regs)
 
     DEFINE_WAIT(_tmp_wait);
 
-    for(;;){
+    for (;;) {
         prepare_to_wait(&wq[idx], &_tmp_wait, TASK_INTERRUPTIBLE);
-        if(smp_load_acquire(&ctx[idx]->status) & CTX_FLAGS_MAIN_DONE)
+        if (smp_load_acquire(&ctx[idx]->status) & CTX_FLAGS_MAIN_DONE)
             break;
-        if(!signal_pending(current)){
+        if (!signal_pending(current)) {
             schedule();
             continue;
         }
@@ -745,7 +748,7 @@ asmlinkage long sys_esca_wait(const struct __user pt_regs* regs)
     }
     finish_wait(&wq[idx], &_tmp_wait);
 
-    //smp_mb();
+    // smp_mb();
     ctx[idx]->status &= ~CTX_FLAGS_MAIN_DONE;
     printk("return from wait\n");
     return get_ready_qlen(cq[idx]);
