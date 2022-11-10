@@ -95,6 +95,11 @@ static struct task_struct* worker_task[CPU_NUM_LIMIT];
 
 // void (*wake_up_new_task_ptr)(struct task_struct *) = 0;
 
+static inline int ffs(unsigned int num)
+{
+    return __builtin_ctz(num);
+}
+
 static inline long
 indirect_call(void* f, int argc,
     long* a)
@@ -352,13 +357,21 @@ static int main_worker(void* arg)
 
             if (res == -EAGAIN) {
                 printk("Do syscall-%d, fd is %d, resource is not available now...\n", ent->sysnum, ent->args[0]);
-                // TODO: choose arg. depending on syscall
-                int hash = ent->args[0] & (WORKQUEUE_DEFAULT_THREAD_NUMS - 1);
+
+                int nxt_wq = ffs(ctx[cur_cpuid]->wq_status);
+
+                if (nxt_wq >= 32) {
+                    printk("Workqueue workers are exhausted\n");
+                    // TODO: error handling
+                }
+                // clear bit (1 << nxt_wq)
+                ctx[cur_cpuid]->wq_status &= ~(1 << nxt_wq);
+
                 offloaded++;
-                copy_table_entry_and_advance(cur_cpuid, hash, ent);
+                copy_table_entry_and_advance(cur_cpuid, nxt_wq, ent);
 
                 smp_mb();
-                if (work_node_reg[hash]->status == IDLE) {
+                if (work_node_reg[nxt_wq]->status == IDLE) {
                     // if (smp_load_acquire(&work_node_reg[hash]->status) == IDLE) {
                     // if (!task_is_running(work_node_reg[hash]->task)){
                     spin_lock_irq(&ctx[cur_cpuid]->l_lock);
@@ -371,10 +384,10 @@ static int main_worker(void* arg)
 
                     ctx[cur_cpuid]->free_list->len--;
                     ctx[cur_cpuid]->running_list->len++;
-                    printk("wake up worker-%d. len = %d\n", hash, ctx[cur_cpuid]->running_list->len);
+                    printk("wake up worker-%d. len = %d\n", nxt_wq, ctx[cur_cpuid]->running_list->len);
                     spin_unlock_irq(&ctx[cur_cpuid]->l_lock);
-                    work_node_reg[hash]->status = RUNNING;
-                    wake_up(&wq_worker_wq[hash]);
+                    work_node_reg[nxt_wq]->status = RUNNING;
+                    wake_up(&wq_worker_wq[nxt_wq]);
                 }
             } else {
                 offloaded++;
@@ -483,6 +496,9 @@ static int wq_worker(void* arg)
         ent = &ctx[ctx_id]->deferred_list[wq_wrk_id][head];
 
         while (smp_load_acquire(&ent->rstatus) == BENTRY_EMPTY) {
+            // update workqueue worker status
+            ctx[ctx_id]->wq_status |= ((unsigned int)1 << wq_wrk_id);
+
             // hybrid (busy waiting + sleep & wait)
             if (signal_pending(current)) {
                 printk("detect signal from wq_worker\n");
@@ -511,6 +527,7 @@ static int wq_worker(void* arg)
             if (ret != -EAGAIN)
                 break;
 
+            ctx[ctx_id]->wq_status &= ~((unsigned int)1 << wq_wrk_id);
             cond_resched();
 
             if (signal_pending(current))
@@ -650,6 +667,7 @@ asmlinkage long sys_esca_register(const struct __user pt_regs* regs)
     ctx[id]->df_mask = MAX_DEFERRED_NUM - 1;
     ctx[id]->comp_num = 0;
     ctx[id]->status = 0;
+    ctx[id]->wq_status = 0xffffffff;
     ctx[id]->idle_time = msecs_to_jiffies(DEFAULT_WQ_IDLE_TIME);
 
     for (int i = 0; i < WORKQUEUE_DEFAULT_THREAD_NUMS; i++) {

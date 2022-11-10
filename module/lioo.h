@@ -9,7 +9,7 @@
 #define CPU_NUM_LIMIT 100
 #define TABLE_LEN_LIMIT 10
 #define TABLE_ENT_LIMIT 64
-#define WORKQUEUE_DEFAULT_THREAD_NUMS 4
+#define WORKQUEUE_DEFAULT_THREAD_NUMS 32
 #define MAX_DEFERRED_NUM 256
 #define MAX_OFFLOADED 2048
 
@@ -94,6 +94,7 @@ struct fastio_ctx {
     int df_tail[WORKQUEUE_DEFAULT_THREAD_NUMS]; /* to be post */
     int comp_num;
     unsigned idle_time; // in jiffies
+    unsigned int wq_status; // set bit if worker isn't been blocked
     int status;
     struct fastio_work_meta* running_list;
     struct fastio_work_meta* free_list;
