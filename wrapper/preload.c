@@ -131,10 +131,8 @@ void peek_main_worker()
 
 long batch_flush_and_wait_some(int num)
 {
-    printf("enter batch_flush_and_wait_some\n");
     int ret = syscall(__NR_esca_wait, this_worker_id * RATIO, num);
     batch_num = 0;
-    printf("return from batch_flush_and_wait_some, ret=%d\n", ret);
     return ret;
 }
 
@@ -180,7 +178,7 @@ esca_table_entry_t* get_next_cqe()
 {
     int i = this_worker_id;
     esca_table_entry_t* res = &cq[i]->user_tables[cq[i]->head_table][cq[i]->head_entry];
-    printf("retrieve cq[%d][%d], status=%d\n", cq[i]->head_table, cq[i]->head_entry, res->rstatus);
+
     if (esca_smp_load_acquire(&res->rstatus) == BENTRY_EMPTY)
         return NULL;
 

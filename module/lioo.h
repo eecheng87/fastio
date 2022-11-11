@@ -19,6 +19,7 @@
 
 /* flags for context */
 #define CTX_FLAGS_MAIN_DONE (1U << 1)
+#define CTX_FLAGS_MAIN_WOULD_SLEEP (1U << 2)
 
 #include "config.h"
 
@@ -85,10 +86,10 @@ struct fastio_work_meta {
 };
 
 struct fastio_ctx {
-    spinlock_t l_lock;
     spinlock_t cq_lock;
     spinlock_t df_lock;
     spinlock_t comp_lock;
+    spinlock_t mini_lock;
     int df_mask; /* MAX_DEFERRED_NUM - 1 */
     int df_head[WORKQUEUE_DEFAULT_THREAD_NUMS]; /* to be consumed */
     int df_tail[WORKQUEUE_DEFAULT_THREAD_NUMS]; /* to be post */

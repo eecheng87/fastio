@@ -5,7 +5,7 @@ int accept4(int sockfd, struct sockaddr* addr, socklen_t* addrlen, int flags)
 {
     int idx = this_worker_id * RATIO + (sockfd % RATIO);
     peek_main_worker();
-    printf("in accept4\n");
+
     batch_num++;
 
     int i = sq[idx]->tail_table;
@@ -30,7 +30,7 @@ ssize_t read(int fd, void* buf, size_t count)
 {
     int idx = this_worker_id * RATIO + (fd % RATIO);
     peek_main_worker();
-    printf("in read\n");
+
     batch_num++;
 
     int i = sq[idx]->tail_table;
@@ -54,7 +54,7 @@ ssize_t send(int sockfd, const void* buf, size_t len, int flags)
 {
     int idx = this_worker_id * RATIO + (sockfd % RATIO);
     peek_main_worker();
-    printf("in send\n");
+
     batch_num++;
 
     int i = sq[idx]->tail_table;

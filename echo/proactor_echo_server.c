@@ -23,8 +23,6 @@ char buffer[MAX_CONN][MAX_MESSAGE_LEN];
 #include "../module/include/esca.h"
 
 // forward declaration
-long batch_start();
-long batch_flush();
 long batch_flush_and_wait_some(int);
 void init_worker(int);
 void fastio_user_setup(void);
@@ -99,11 +97,11 @@ int main(int argc, char* argv[])
             if (!cqe) {
                 continue;
             }
-            printf("sys[%d](%d,%d,%d)\n", cqe->sysnum, cqe->args[0], cqe->args[1], cqe->args[2]);
+
             switch (cqe->sysnum) {
             case __ESCA_accept4:
                 int cq_fd = cqe->sysret;
-                printf("in accept state, res = %d\n", cq_fd);
+                // printf("accept fd %d\n", cq_fd);
                 if (cq_fd >= 0) {
                     buf_idx = get_next_buf(buf_idx);
                     read(cq_fd, buffer[buf_idx], MAX_MESSAGE_LEN);
@@ -114,7 +112,7 @@ int main(int argc, char* argv[])
                 break;
             case __ESCA_read:
                 res = cqe->sysret;
-                printf("in read state, res = %d\n", res);
+                // printf("in read state, res = %d\n", res);
                 if (res <= 0) {
                     printf("Read error on file descriptor %ld\n", cqe->args[0]);
                     close(cqe->args[0]);
@@ -124,10 +122,10 @@ int main(int argc, char* argv[])
                 break;
             case __ESCA_sendto:
                 res = cqe->sysret;
-                printf("in write state, res = %d\n", res);
+                // printf("in write state, res = %d\n", res);
                 if (res < 0) {
                     printf("Write error on file descriptor %ld\n", cqe->args[0]);
-                    // FIXME: what is the next state, `close`?
+                    close(cqe->args[0]);
                 } else {
                     // FIXME: memset?
                     buf_idx = get_next_buf(buf_idx);
