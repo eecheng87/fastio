@@ -374,20 +374,6 @@ static int main_worker(void* arg)
 
                 smp_mb();
                 if (work_node_reg[nxt_wq]->status == IDLE) {
-                    // if (smp_load_acquire(&work_node_reg[hash]->status) == IDLE) {
-                    // if (!task_is_running(work_node_reg[hash]->task)){
-                    // spin_lock_irq(&ctx[cur_cpuid]->l_lock);
-
-                    // remove current node in free list
-                    // list_del(&work_node_reg[hash]->list);
-
-                    // append current node to the tail of running list
-                    // list_add_tail(&work_node_reg[hash]->list, &ctx[cur_cpuid]->running_list->list);
-
-                    // ctx[cur_cpuid]->free_list->len--;
-                    // ctx[cur_cpuid]->running_list->len++;
-                    // printk("wake up worker-%d. len = %d\n", nxt_wq, ctx[cur_cpuid]->running_list->len);
-                    // spin_unlock_irq(&ctx[cur_cpuid]->l_lock);
                     work_node_reg[nxt_wq]->status = RUNNING;
                     wake_up(&wq_worker_wq[nxt_wq]);
                 }
@@ -567,19 +553,6 @@ static int wq_worker(void* arg)
         goto wq_worker_advance;
 
     wq_worker_sleep:
-        // spin_lock_irq(&ctx[ctx_id]->l_lock);
-
-        // remove current node in running list
-        // list_del(self);
-
-        // append current node to the tail of free list
-        // list_add_tail(self, &ctx[ctx_id]->free_list->list);
-
-        // ctx[ctx_id]->free_list->len++;
-        // ctx[ctx_id]->running_list->len--;
-        // printk("wq-%d go to sleep. len = %d\n", wq_wrk_id, ctx[ctx_id]->running_list->len);
-        // spin_unlock_irq(&ctx[ctx_id]->l_lock);
-
         prepare_to_wait(&wq_worker_wq[wq_wrk_id], &wq_wait, TASK_INTERRUPTIBLE);
 
         // smp_store_release(&work_node_reg[wq_wrk_id]->status, IDLE);
