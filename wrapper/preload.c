@@ -163,28 +163,28 @@ void update_tail(esca_table_t* T)
     }
 }
 
-void update_head(esca_table_t* T)
+void update_head(int* i, int* j)
 {
+    esca_table_t* T = cq[this_worker_id];
+
     // caller need to guarantee that there is available cqe
-    if (T->head_entry == MAX_TABLE_ENTRY - 1) {
-        T->head_entry = 0;
-        T->head_table = (T->head_table == MAX_TABLE_LEN - 1) ? 0 : T->head_table + 1;
+    if (*j == MAX_TABLE_ENTRY - 1) {
+        *j = 0;
+        *i = (*i == MAX_TABLE_LEN - 1) ? 0 : *i + 1;
     } else {
-        T->head_entry++;
+        *j += 1;
     }
 }
 
-esca_table_entry_t* get_next_cqe()
+esca_table_entry_t* get_cqe(int i, int j)
 {
-    int i = this_worker_id;
-    esca_table_entry_t* res = &cq[i]->user_tables[cq[i]->head_table][cq[i]->head_entry];
+    esca_table_entry_t* res = &cq[this_worker_id]->user_tables[i][j];
 
     if (esca_smp_load_acquire(&res->rstatus) == BENTRY_EMPTY)
         return NULL;
 
     res->rstatus = BENTRY_EMPTY;
 
-    update_head(cq[i]);
     return res;
 }
 

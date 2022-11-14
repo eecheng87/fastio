@@ -1,6 +1,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <netinet/in.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -19,6 +20,7 @@
 #endif
 
 char buffer[MAX_CONN][MAX_MESSAGE_LEN];
+int cq_i, cq_j;
 
 #include "../module/include/esca.h"
 
@@ -26,7 +28,8 @@ char buffer[MAX_CONN][MAX_MESSAGE_LEN];
 long batch_flush_and_wait_some(int);
 void init_worker(int);
 void fastio_user_setup(void);
-esca_table_entry_t* get_next_cqe(void);
+void update_head(int*, int*);
+esca_table_entry_t* get_cqe(int, int);
 
 int get_next_buf(int idx)
 {
@@ -73,6 +76,7 @@ int main(int argc, char* argv[])
 
     // initialize fastio user context
     fastio_user_setup();
+    cq_i = cq_j = 0;
 
     // initialize fastio kernel context
     init_worker(0);
@@ -92,11 +96,13 @@ int main(int argc, char* argv[])
         // go through all CQEs
         for (int i = 0; i < cq_ret; i++) {
             long res;
-            esca_table_entry_t* cqe = get_next_cqe();
+            esca_table_entry_t* cqe = get_cqe(cq_i, cq_j);
 
             if (!cqe) {
                 continue;
             }
+
+            update_head(&cq_i, &cq_j);
 
             switch (cqe->sysnum) {
             case __ESCA_accept4:

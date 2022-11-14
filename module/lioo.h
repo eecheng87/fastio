@@ -20,6 +20,7 @@
 /* flags for context */
 #define CTX_FLAGS_MAIN_DONE (1U << 1)
 #define CTX_FLAGS_MAIN_WOULD_SLEEP (1U << 2)
+#define CTX_FLAGS_WAKEUP_FROM_WQ (1U << 3)
 
 #include "config.h"
 
@@ -62,18 +63,13 @@ typedef struct esca_meta {
 
 esca_config_t* config;
 
-/* workqueue */
-typedef enum work_status wrk_status;
-
-enum work_status {
-    RUNNING,
-    IDLE
-};
+/* flags for workqueue */
+#define WQ_FLAGS_IS_RUNNING (1U << 1)
 
 struct fastio_work_node {
     int table;
     int cache_comp_num;
-    wrk_status status;
+    int status;
     spinlock_t wrk_lock;
     struct task_struct* task;
     struct list_head list;
@@ -96,7 +92,9 @@ struct fastio_ctx {
     int comp_num;
     unsigned idle_time; // in jiffies
     unsigned int wq_status; // set bit if worker isn't been blocked
+    unsigned int wq_has_finished; // set bit if there is at least one task completed
     int status;
+    int commited_cq;
     struct fastio_work_meta* running_list;
     struct fastio_work_meta* free_list;
     esca_table_entry_t deferred_list[WORKQUEUE_DEFAULT_THREAD_NUMS][MAX_DEFERRED_NUM];
