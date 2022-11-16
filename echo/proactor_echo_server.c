@@ -94,6 +94,7 @@ int main(int argc, char* argv[])
         }
 #endif
         // go through all CQEs
+        printf("cq_ret = %d\n", cq_ret);
         for (int i = 0; i < cq_ret; i++) {
             long res;
             esca_table_entry_t* cqe = get_cqe(cq_i, cq_j);
@@ -107,7 +108,7 @@ int main(int argc, char* argv[])
             switch (cqe->sysnum) {
             case __ESCA_accept4:
                 int cq_fd = cqe->sysret;
-                // printf("accept fd %d\n", cq_fd);
+                printf("accept fd %d\n", cq_fd);
                 if (cq_fd >= 0) {
                     buf_idx = get_next_buf(buf_idx);
                     read(cq_fd, buffer[buf_idx], MAX_MESSAGE_LEN);
@@ -137,6 +138,9 @@ int main(int argc, char* argv[])
                     buf_idx = get_next_buf(buf_idx);
                     read(cqe->args[0], buffer[buf_idx], MAX_MESSAGE_LEN);
                 }
+                break;
+            case __ESCA_close:
+                printf("in close state, closing fd(%d)\n", cqe->args[0]);
                 break;
             default:
                 printf("in default, sysnum = %d\n", cqe->sysnum);

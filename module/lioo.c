@@ -379,14 +379,14 @@ static int main_worker(void* arg)
                 // FIXME: need write barrier?
                 WRITE_ONCE(sq[cur_cpuid]->flags, sq[cur_cpuid]->flags & ~ESCA_WORKER_NEED_WAKEUP);
                 timeout = jiffies + sq[cur_cpuid]->idle_time;
-#if 0
+#if 1
                 // waken by wq-worker imply that there are some completed tasks
                 // FIXME: do we need to consider multiple wq worker wakeup it and the correctness of cq len
                 if (READ_ONCE(ctx[cur_cpuid]->wq_has_finished) != 0) {
                     spin_lock_irq(&ctx[cur_cpuid]->comp_lock);
                     ctx[cur_cpuid]->wq_has_finished = 0;
                     spin_unlock_irq(&ctx[cur_cpuid]->comp_lock);
-                    WRITE_ONCE(ctx[cur_cpuid]->status, ctx[cur_cpuid]->status & (~CTX_FLAGS_MAIN_WOULD_SLEEP));
+                    // WRITE_ONCE(ctx[cur_cpuid]->status, ctx[cur_cpuid]->status & (~CTX_FLAGS_MAIN_WOULD_SLEEP));
                     goto main_done_entry;
                 }
 #endif
@@ -485,7 +485,7 @@ static int main_worker(void* arg)
                     while (ctx[cur_cpuid]->comp_num < threshold) {
                         cond_resched();
 
-                        if (get_ready_qlen(sq[cur_cpuid], cur_cpuid) > 0)
+                        if (smp_load_acquire(&sq[cur_cpuid]->tables[i][j].rstatus) != BENTRY_EMPTY)
                             goto submitted_again;
 
                         if (signal_pending(current))
@@ -495,7 +495,6 @@ static int main_worker(void* arg)
                     // FIXME: is lock needed?
 
                     spin_lock_irq(&ctx[cur_cpuid]->comp_lock);
-                    ctx[cur_cpuid]->commited_cq = get_ready_qlen_and_advance(cq[cur_cpuid], cur_cpuid);
                     ctx[cur_cpuid]->comp_num = 0;
                     spin_unlock_irq(&ctx[cur_cpuid]->comp_lock);
 
@@ -860,14 +859,8 @@ asmlinkage long sys_esca_wait(const struct __user pt_regs* regs)
 
     smp_mb();
     WRITE_ONCE(ctx[idx]->status, ctx[idx]->status & (~CTX_FLAGS_MAIN_DONE));
-    // ctx[idx]->status &= ~CTX_FLAGS_WAKEUP_FROM_WQ;
 
-    spin_lock_irq(&ctx[idx]->comp_lock);
-    res = ctx[idx]->commited_cq;
-    spin_unlock_irq(&ctx[idx]->comp_lock);
-
-    //  FIXME: wrong returned value?
-    return res;
+    return get_ready_qlen_and_advance(cq[idx], idx);
 }
 
 asmlinkage void sys_esca_init_config(const struct __user pt_regs* regs)
