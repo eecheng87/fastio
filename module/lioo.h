@@ -16,6 +16,7 @@
 /* define flags */
 #define ESCA_WORKER_NEED_WAKEUP (1U << 1)
 #define ESCA_START_WAKEUP (1U << 2)
+#define ESCA_USER_NEED_WAKEUP (1U << 3)
 
 /* flags for context */
 #define CTX_FLAGS_MAIN_DONE (1U << 1)
@@ -42,6 +43,7 @@ typedef struct esca_table {
     short tail_entry;
     unsigned idle_time; // in jiffies
     unsigned int flags;
+    unsigned int avail_ent;
 } esca_table_t;
 
 typedef struct esca_wkr_args {

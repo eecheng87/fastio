@@ -411,7 +411,7 @@ static int main_worker(void* arg)
                 // printk("Do syscall-%d, fd is %d, resource is not available now...\n", ent->sysnum, ent->args[0]);
 
                 int nxt_wq = ffs(ctx[cur_cpuid]->wq_status);
-                // printk("dispatch sys[%d] to wq[%d]\n", ent->sysnum, nxt_wq);
+                printk("dispatch sys[%d] to wq[%d]\n", ent->sysnum, nxt_wq);
                 if (nxt_wq >= 32) {
                     printk("Workqueue workers are exhausted\n");
                     // TODO: error handling
@@ -498,19 +498,9 @@ static int main_worker(void* arg)
                     ctx[cur_cpuid]->comp_num = 0;
                     spin_unlock_irq(&ctx[cur_cpuid]->comp_lock);
 
-                    // FIXME: is not important for `batch_flush_and_wait_some(1);`
-                    // remaining offloaded tasks
-#if 0
-                    if (cache_mini_ret >= 0)
-                        offloaded -= cache_mini_ret;
-                    else
-                        offloaded = 0;
-#endif
-
-                    // printk("wakeup user[%d]\n", cur_cpuid);
-                    WRITE_ONCE(ctx[cur_cpuid]->status, ctx[cur_cpuid]->status |= CTX_FLAGS_MAIN_DONE);
-                    smp_mb(); // FIXME: is this needed?
-                    wake_up_interruptible(&wq[cur_cpuid]);
+                    cq[cur_cpuid]->avail_ent = get_ready_qlen_and_advance(cq[cur_cpuid], cur_cpuid);
+                    smp_mb();
+                    WRITE_ONCE(cq[cur_cpuid]->flags, cq[cur_cpuid]->flags | ESCA_USER_NEED_WAKEUP);
                 }
             }
 
@@ -545,7 +535,7 @@ static int wq_worker(void* arg)
     esca_table_entry_t* ent;
     struct list_head* self = ((esca_wkr_args_t*)arg)->self;
 
-    // TODO: set affinity
+    set_cpus_allowed_ptr(current, cpumask_of(3) + wq_wrk_id % 2);
     printk("wq-%d is launching, running on CPU-%d\n", wq_wrk_id, smp_processor_id());
 
     while (1) {
@@ -713,6 +703,7 @@ asmlinkage long sys_esca_register(const struct __user pt_regs* regs)
     Q[id]->head_entry = Q[id]->tail_entry = 0;
     Q[id]->flags = 0 | ESCA_WORKER_NEED_WAKEUP;
     Q[id]->idle_time = msecs_to_jiffies(DEFAULT_MAIN_IDLE_TIME);
+    Q[id]->avail_ent = 0;
 
     if (reg_type == REG_CQ)
         return 0;
@@ -822,45 +813,7 @@ asmlinkage void sys_esca_wakeup(const struct __user pt_regs* regs)
 
 asmlinkage long sys_esca_wait(const struct __user pt_regs* regs)
 {
-
-#if defined(__x86_64__)
-    int idx = regs->di;
-#elif defined(__aarch64__)
-    int idx = regs->regs[0];
-#endif
-
-    // spin_lock_irq(&ctx[idx]->mini_lock);
-#if defined(__x86_64__)
-    mini_ret = regs->si;
-#elif defined(__aarch64__)
-    mini_ret = regs->regs[1];
-#endif
-    // spin_unlock_irq(&ctx[idx]->mini_lock);
-
-    long res;
-
-    DEFINE_WAIT(_tmp_wait);
-
-    for (;;) {
-        prepare_to_wait(&wq[idx], &_tmp_wait, TASK_INTERRUPTIBLE);
-        // FIXME: the second condition only correct when using `batch_flush_and_wait_some(1)`
-        if ((READ_ONCE(ctx[idx]->status) & CTX_FLAGS_MAIN_DONE))
-            // || (READ_ONCE(ctx[idx]->status) & CTX_FLAGS_WAKEUP_FROM_WQ))
-            //((READ_ONCE(ctx[idx]->status) & CTX_FLAGS_MAIN_WOULD_SLEEP) &&
-            //(get_ready_qlen(cq[idx], idx) != 0)))
-            break;
-        if (!signal_pending(current)) {
-            schedule();
-            continue;
-        }
-        break;
-    }
-    finish_wait(&wq[idx], &_tmp_wait);
-
-    smp_mb();
-    WRITE_ONCE(ctx[idx]->status, ctx[idx]->status & (~CTX_FLAGS_MAIN_DONE));
-
-    return get_ready_qlen_and_advance(cq[idx], idx);
+    return 0;
 }
 
 asmlinkage void sys_esca_init_config(const struct __user pt_regs* regs)

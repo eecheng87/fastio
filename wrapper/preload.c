@@ -131,9 +131,12 @@ void peek_main_worker()
 
 long batch_flush_and_wait_some(int num)
 {
-    int ret = syscall(__NR_esca_wait, this_worker_id * RATIO, num);
-    batch_num = 0;
-    return ret;
+    int idx = this_worker_id * RATIO;
+
+    while(!(ESCA_READ_ONCE(cq[idx]->flags) & ESCA_USER_NEED_WAKEUP));
+    ESCA_WRITE_ONCE(cq[idx]->flags, cq[idx]->flags & ~ESCA_USER_NEED_WAKEUP);
+
+    return cq[idx]->avail_ent;
 }
 
 long batch_flush()

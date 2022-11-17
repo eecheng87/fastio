@@ -44,6 +44,7 @@ extern esca_config_t* config;
 /* define flags */
 #define ESCA_WORKER_NEED_WAKEUP (1U << 1)
 #define ESCA_START_WAKEUP (1U << 2)
+#define ESCA_USER_NEED_WAKEUP (1U << 3)
 
 typedef struct esca_table_entry {
     unsigned pid;
@@ -63,6 +64,7 @@ typedef struct esca_table {
     short tail_entry;
     unsigned idle_time; // in jiffies
     unsigned int flags;
+    unsigned int avail_ent;
 } esca_table_t;
 
 typedef struct esca_wkr_args {
