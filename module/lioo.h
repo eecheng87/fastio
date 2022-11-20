@@ -85,18 +85,14 @@ struct fastio_ctx {
     spinlock_t cq_lock;
     spinlock_t df_lock;
     spinlock_t comp_lock;
-    spinlock_t mini_lock;
     int df_mask; /* MAX_DEFERRED_NUM - 1 */
     int df_head[WORKQUEUE_DEFAULT_THREAD_NUMS]; /* to be consumed */
     int df_tail[WORKQUEUE_DEFAULT_THREAD_NUMS]; /* to be post */
     int comp_num;
-    unsigned idle_time; // in jiffies
+    unsigned idle_time; // FIXME: might be private to each wq-worker
     unsigned int wq_status; // set bit if worker isn't been blocked
     unsigned int wq_has_finished; // set bit if there is at least one task completed
     int status;
-    int commited_cq;
-    struct fastio_work_meta* running_list;
-    struct fastio_work_meta* free_list;
     esca_table_entry_t deferred_list[WORKQUEUE_DEFAULT_THREAD_NUMS][MAX_DEFERRED_NUM];
 };
 struct fastio_ctx* ctx[TABLE_LEN_LIMIT];

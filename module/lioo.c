@@ -463,9 +463,7 @@ static int main_worker(void* arg)
             int threshold, cache_mini_ret;
 
             // FIXME: cache_mini_ret might be outdated
-            // spin_lock_irq(&ctx[cur_cpuid]->mini_lock);
             cache_mini_ret = mini_ret;
-            // spin_unlock_irq(&ctx[cur_cpuid]->mini_lock);
 
             threshold = (cache_mini_ret < 0) ? offloaded : cache_mini_ret;
 
@@ -731,10 +729,8 @@ asmlinkage long sys_esca_register(const struct __user pt_regs* regs)
     // setup context of fastio
     should_be_submitted[id] = 0;
     ctx[id] = kmalloc(sizeof(struct fastio_ctx), GFP_KERNEL);
-    ctx[id]->running_list = ctx[id]->free_list = NULL;
     ctx[id]->df_mask = MAX_DEFERRED_NUM - 1;
     ctx[id]->comp_num = 0;
-    ctx[id]->commited_cq = 0;
     ctx[id]->idle_time = msecs_to_jiffies(DEFAULT_WQ_IDLE_TIME);
 
     WRITE_ONCE(ctx[id]->status, CTX_FLAGS_MAIN_WOULD_SLEEP);
@@ -753,7 +749,6 @@ asmlinkage long sys_esca_register(const struct __user pt_regs* regs)
     spin_lock_init(&ctx[id]->cq_lock);
     spin_lock_init(&ctx[id]->df_lock);
     spin_lock_init(&ctx[id]->comp_lock);
-    spin_lock_init(&ctx[id]->mini_lock);
 
     create_worker_pool(WORKQUEUE_DEFAULT_THREAD_NUMS, id);
 
@@ -775,9 +770,6 @@ static void create_worker_pool(int concurrency, int ctx_id)
 
     rhead->len = fhead->len = 0;
 
-    ctx[ctx_id]->running_list = rhead;
-    ctx[ctx_id]->free_list = fhead;
-
     for (int arg_idx = 0; arg_idx < concurrency; arg_idx++) {
         struct fastio_work_node* node = kmalloc(sizeof(struct fastio_work_node), GFP_KERNEL);
 
@@ -792,8 +784,6 @@ static void create_worker_pool(int concurrency, int ctx_id)
         node->cache_comp_num = 0;
         node->task = create_io_thread_ptr(wq_worker, wq_wrk_args[arg_idx], -1);
         spin_lock_init(&node->wrk_lock);
-        list_add_tail(&node->list, &ctx[ctx_id]->running_list->list);
-        // ctx[ctx_id]->running_list->len++;
     }
 }
 
@@ -829,13 +819,11 @@ asmlinkage long sys_esca_wait(const struct __user pt_regs* regs)
     int idx = regs->regs[0];
 #endif
 
-    // spin_lock_irq(&ctx[idx]->mini_lock);
 #if defined(__x86_64__)
     mini_ret = regs->si;
 #elif defined(__aarch64__)
     mini_ret = regs->regs[1];
 #endif
-    // spin_unlock_irq(&ctx[idx]->mini_lock);
 
     long res;
 
