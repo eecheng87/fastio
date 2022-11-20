@@ -44,9 +44,10 @@ typedef struct esca_table {
     unsigned int flags;
 } esca_table_t;
 
+/* argument passed into new io-worker; used by main- and wq- worker */
 typedef struct esca_wkr_args {
     int ctx_id;
-    int wq_wrk_id;
+    int wrk_id; // the index of the current worker in the context
     struct list_head* self;
 } esca_wkr_args_t;
 
