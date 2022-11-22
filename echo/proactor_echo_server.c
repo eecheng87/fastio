@@ -86,65 +86,54 @@ int main(int argc, char* argv[])
 
     // start event loop
     while (1) {
-        int cq_ret = batch_flush_and_wait_some(1);
-#if 0
-        if (cq_ret > 0) {
-            peek_main_worker();
-            // printf("cq_ret = %d\n", cq_ret);
+        long res;
+        esca_table_entry_t* cqe = get_cqe(cq_i, cq_j);
+
+        if (!cqe) {
+            continue;
         }
-#endif
-        // go through all CQEs
-        printf("cq_ret = %d\n", cq_ret);
-        for (int i = 0; i < cq_ret; i++) {
-            long res;
-            esca_table_entry_t* cqe = get_cqe(cq_i, cq_j);
 
-            if (!cqe) {
-                continue;
+        update_head(&cq_i, &cq_j);
+
+        switch (cqe->sysnum) {
+        case __ESCA_accept4:
+            int cq_fd = cqe->sysret;
+            // printf("accept fd %d\n", cq_fd);
+            if (cq_fd >= 0) {
+                buf_idx = get_next_buf(buf_idx);
+                read(cq_fd, buffer[buf_idx], MAX_MESSAGE_LEN);
             }
 
-            update_head(&cq_i, &cq_j);
+            accept4(sock_listen_fd, (struct sockaddr*)&client_addr, &client_len, SOCK_NONBLOCK);
 
-            switch (cqe->sysnum) {
-            case __ESCA_accept4:
-                int cq_fd = cqe->sysret;
-                printf("accept fd %d\n", cq_fd);
-                if (cq_fd >= 0) {
-                    buf_idx = get_next_buf(buf_idx);
-                    read(cq_fd, buffer[buf_idx], MAX_MESSAGE_LEN);
-                }
-
-                accept4(sock_listen_fd, (struct sockaddr*)&client_addr, &client_len, SOCK_NONBLOCK);
-
-                break;
-            case __ESCA_read:
-                res = cqe->sysret;
-                // printf("in read state, res = %d\n", res);
-                if (res <= 0) {
-                    printf("Read error on file descriptor %ld\n", cqe->args[0]);
-                    close(cqe->args[0]);
-                } else {
-                    send(cqe->args[0], cqe->args[1], res, 0);
-                }
-                break;
-            case __ESCA_sendto:
-                res = cqe->sysret;
-                // printf("in write state, res = %d\n", res);
-                if (res < 0) {
-                    printf("Write error on file descriptor %ld\n", cqe->args[0]);
-                    close(cqe->args[0]);
-                } else {
-                    // FIXME: memset?
-                    buf_idx = get_next_buf(buf_idx);
-                    read(cqe->args[0], buffer[buf_idx], MAX_MESSAGE_LEN);
-                }
-                break;
-            case __ESCA_close:
-                printf("in close state, closing fd(%d)\n", cqe->args[0]);
-                break;
-            default:
-                printf("in default, sysnum = %d\n", cqe->sysnum);
+            break;
+        case __ESCA_read:
+            res = cqe->sysret;
+            // printf("in read state, res = %d\n", res);
+            if (res <= 0) {
+                printf("Read error on file descriptor %ld\n", cqe->args[0]);
+                close(cqe->args[0]);
+            } else {
+                send(cqe->args[0], cqe->args[1], res, 0);
             }
+            break;
+        case __ESCA_sendto:
+            res = cqe->sysret;
+            // printf("in write state, res = %d\n", res);
+            if (res < 0) {
+                printf("Write error on file descriptor %ld\n", cqe->args[0]);
+                close(cqe->args[0]);
+            } else {
+                // FIXME: memset?
+                buf_idx = get_next_buf(buf_idx);
+                read(cqe->args[0], buffer[buf_idx], MAX_MESSAGE_LEN);
+            }
+            break;
+        case __ESCA_close:
+            printf("in close state, closing fd(%d)\n", cqe->args[0]);
+            break;
+        default:
+            printf("in default, sysnum = %d\n", cqe->sysnum);
         }
     }
 }

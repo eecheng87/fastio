@@ -42,8 +42,9 @@
 extern esca_config_t* config;
 
 /* define flags */
-#define ESCA_WORKER_NEED_WAKEUP (1U << 1)
-#define ESCA_START_WAKEUP (1U << 2)
+#define MAIN_WORKER_NEED_WAKEUP (1U << 1)
+#define START_WAKEUP_MAIN_WORKER (1U << 2)
+#define CTX_FLAGS_MAIN_WOULD_SLEEP (1U << 3)
 
 typedef struct esca_table_entry {
     unsigned pid;
@@ -63,10 +64,15 @@ typedef struct esca_table {
     short tail_entry;
     unsigned idle_time; // in jiffies
     unsigned int flags;
+    unsigned int wq_has_finished; // for SQ only; set bit if there is at least one task completed
+    unsigned int main_has_finished;
 } esca_table_t;
 
+/* argument passed into new io-worker; used by main- and wq- worker */
 typedef struct esca_wkr_args {
-    int id;
+    int ctx_id;
+    int wrk_id; // the index of the current worker in the context
+    struct list_head* self;
 } esca_wkr_args_t;
 
 #endif

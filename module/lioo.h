@@ -13,13 +13,14 @@
 #define MAX_DEFERRED_NUM 256
 #define MAX_OFFLOADED 2048
 
-/* define flags */
-#define ESCA_WORKER_NEED_WAKEUP (1U << 1)
-#define ESCA_START_WAKEUP (1U << 2)
+/* flags for sq */
+#define MAIN_WORKER_NEED_WAKEUP (1U << 1)
+#define START_WAKEUP_MAIN_WORKER (1U << 2)
+#define CTX_FLAGS_MAIN_WOULD_SLEEP (1U << 3)
+#define CTX_FLAGS_MASTER_SHOULD_LEAVE_EMP (1U << 4)
 
 /* flags for context */
 #define CTX_FLAGS_MAIN_DONE (1U << 1)
-#define CTX_FLAGS_MAIN_WOULD_SLEEP (1U << 2)
 #define CTX_FLAGS_WAKEUP_FROM_WQ (1U << 3)
 
 #include "config.h"
@@ -42,6 +43,8 @@ typedef struct esca_table {
     short tail_entry;
     unsigned idle_time; // in jiffies
     unsigned int flags;
+    unsigned int wq_has_finished; // for SQ and master-main_worker only; set bit if there is at least one task completed
+    unsigned int main_has_finished;
 } esca_table_t;
 
 /* argument passed into new io-worker; used by main- and wq- worker */
@@ -86,15 +89,16 @@ struct fastio_ctx {
     spinlock_t cq_lock;
     spinlock_t df_lock;
     spinlock_t comp_lock;
+    spinlock_t wq_status_lock;
     int df_mask; /* MAX_DEFERRED_NUM - 1 */
     int df_head[WORKQUEUE_DEFAULT_THREAD_NUMS]; /* to be consumed */
     int df_tail[WORKQUEUE_DEFAULT_THREAD_NUMS]; /* to be post */
     int comp_num;
+    int nxt_wq;
     unsigned idle_time; // FIXME: might be private to each wq-worker
     unsigned int wq_status; // set bit if worker isn't been blocked
-    unsigned int wq_has_finished; // set bit if there is at least one task completed
     int status;
-    esca_table_entry_t deferred_list[WORKQUEUE_DEFAULT_THREAD_NUMS][MAX_DEFERRED_NUM];
+    esca_table_entry_t deferred_list[WORKQUEUE_DEFAULT_THREAD_NUMS][MAX_DEFERRED_NUM]; // $pid stores the value of main_worker dispatching this task
 };
 struct fastio_ctx* ctx[TABLE_LEN_LIMIT];
 

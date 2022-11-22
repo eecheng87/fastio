@@ -8,6 +8,7 @@
 #define CONFIG_ARG_MAX_BYTES 128
 #define REG_SQ 0
 #define REG_CQ 1
+#define REG_LAUNCH 2
 
 typedef struct config_option {
     char key[CONFIG_ARG_MAX_BYTES];

@@ -43,6 +43,9 @@ esca_table_t* cq[CPU_NUM_LIMIT];
 
 void init_worker(int idx)
 {
+    esca_table_entry_t* alloc_cq = NULL;
+    esca_table_t* cq_header = NULL;
+
     in_segment = 0;
     batch_num = 0;
     syscall_num = 0;
@@ -60,33 +63,44 @@ void init_worker(int idx)
     for (int i = idx * RATIO; i < idx * RATIO + RATIO; i++) {
         /* headers in same set using a same page */
         esca_table_t* sq_header = NULL;
-        esca_table_t* cq_header = NULL;
+        esca_table_entry_t* alloc_sq = NULL;
 
         if (i == idx * RATIO) {
             sq_header = sq[i] = (esca_table_t*)aligned_alloc(pgsize, pgsize);
-            cq_header = cq[i] = (esca_table_t*)aligned_alloc(pgsize, pgsize);
         }
         sq[i] = sq[idx * RATIO] + (i - idx * RATIO);
-        cq[i] = cq[idx * RATIO] + (i - idx * RATIO);
 
         /* allocate tables */
-        esca_table_entry_t* alloc_sq = (esca_table_entry_t*)aligned_alloc(pgsize, pgsize * MAX_TABLE_LEN);
-        esca_table_entry_t* alloc_cq = (esca_table_entry_t*)aligned_alloc(pgsize, pgsize * MAX_TABLE_LEN);
+        alloc_sq = (esca_table_entry_t*)aligned_alloc(pgsize, pgsize * MAX_TABLE_LEN);
 
-        if (!alloc_sq || !alloc_cq) {
-            printf("[ERROR] alloc failed\n");
+        if (!alloc_sq) {
+            printf("[ERROR] alloc SQ failed\n");
             goto init_worker_exit;
         }
 
         /* pin tables to kernel */
         syscall(__NR_esca_register, sq_header, alloc_sq, i, REG_SQ);
-        syscall(__NR_esca_register, cq_header, alloc_cq, i, REG_CQ);
 
         /* pin table from kernel to user */
         for (int j = 0; j < MAX_TABLE_LEN; j++) {
             sq[i]->user_tables[j] = alloc_sq + j * MAX_TABLE_ENTRY;
-            cq[i]->user_tables[j] = alloc_cq + j * MAX_TABLE_ENTRY;
         }
+    }
+
+    /* each context has only one CQ */
+    cq_header = cq[idx] = (esca_table_t*)aligned_alloc(pgsize, pgsize);
+    alloc_cq = (esca_table_entry_t*)aligned_alloc(pgsize, pgsize * MAX_TABLE_LEN);
+
+    if (!alloc_cq) {
+        printf("[ERROR] alloc CQ failed\n");
+        goto init_worker_exit;
+    }
+
+    /* The index of CQ is as same as context's */
+    syscall(__NR_esca_register, cq_header, alloc_cq, idx * RATIO, REG_CQ);
+
+    for (int j = 0; j < MAX_TABLE_LEN; j++) {
+        cq[idx]->user_tables[j] = alloc_cq + j * MAX_TABLE_ENTRY;
     }
 
     mpool = (void*)malloc(sizeof(unsigned char) * MAX_POOL_SIZE);
@@ -95,6 +109,9 @@ void init_worker(int idx)
     iov_offset = 0;
     msgpool = (struct msghdr*)malloc(sizeof(struct msghdr) * MAX_POOL_MSG_SIZE);
     msg_offset = 0;
+
+    /* launch workers */
+    syscall(__NR_esca_register, NULL, NULL, idx, REG_LAUNCH);
 
 init_worker_exit:
     return;
@@ -106,10 +123,10 @@ long batch_start()
     in_segment = 1;
 
     for (int j = i * RATIO; j < i * RATIO + RATIO; j++) {
-        if (esca_unlikely(ESCA_READ_ONCE(sq[j]->flags) & ESCA_WORKER_NEED_WAKEUP)) {
-            sq[j]->flags |= ESCA_START_WAKEUP;
+        if (esca_unlikely(ESCA_READ_ONCE(sq[j]->flags) & MAIN_WORKER_NEED_WAKEUP)) {
+            sq[j]->flags |= START_WAKEUP_MAIN_WORKER;
             syscall(__NR_esca_wakeup, j);
-            sq[j]->flags &= ~ESCA_START_WAKEUP;
+            sq[j]->flags &= ~START_WAKEUP_MAIN_WORKER;
         }
     }
 
@@ -121,17 +138,17 @@ void peek_main_worker()
     int i = this_worker_id;
 
     for (int j = i * RATIO; j < i * RATIO + RATIO; j++) {
-        if (esca_unlikely(ESCA_READ_ONCE(sq[j]->flags) & ESCA_WORKER_NEED_WAKEUP)) {
-            sq[j]->flags |= ESCA_START_WAKEUP;
+        if (esca_unlikely(ESCA_READ_ONCE(sq[j]->flags) & MAIN_WORKER_NEED_WAKEUP)) {
+            sq[j]->flags |= START_WAKEUP_MAIN_WORKER;
             syscall(__NR_esca_wakeup, j);
-            sq[j]->flags &= ~ESCA_START_WAKEUP;
+            sq[j]->flags &= ~START_WAKEUP_MAIN_WORKER;
         }
     }
 }
 
 long batch_flush_and_wait_some(int num)
 {
-    int ret = syscall(__NR_esca_wait, this_worker_id * RATIO, num);
+    int ret = syscall(__NR_esca_wait, this_worker_id, num);
     batch_num = 0;
     return ret;
 }
@@ -180,8 +197,8 @@ esca_table_entry_t* get_cqe(int i, int j)
 {
     esca_table_entry_t* res = &cq[this_worker_id]->user_tables[i][j];
 
-    if (esca_smp_load_acquire(&res->rstatus) == BENTRY_EMPTY)
-        return NULL;
+    while (esca_smp_load_acquire(&res->rstatus) == BENTRY_EMPTY)
+        ;
 
     res->rstatus = BENTRY_EMPTY;
 

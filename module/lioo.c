@@ -76,7 +76,7 @@ static int worker(void* arg);
 // TODO: encapsulate them
 wait_queue_head_t wq_worker_wq[WORKQUEUE_DEFAULT_THREAD_NUMS];
 wait_queue_head_t wq_worker_wait[WORKQUEUE_DEFAULT_THREAD_NUMS];
-wait_queue_head_t worker_wait[CPU_NUM_LIMIT];
+wait_queue_head_t main_worker_wait[CPU_NUM_LIMIT];
 wait_queue_head_t wq[CPU_NUM_LIMIT];
 // int flags[MAX_CPU_NUM]; // need_wake_up; this might be shared with user space (be aware of memory barrier)
 
@@ -104,6 +104,22 @@ static int ffs(unsigned int num)
             return i;
 
     return 32;
+}
+
+static inline int get_nxt_wq(int idx)
+{
+    int res;
+    do {
+        res = ctx[idx]->nxt_wq;
+        ctx[idx]->nxt_wq = (ctx[idx]->nxt_wq + 1) & 31;
+    } while ((~READ_ONCE(ctx[idx]->wq_status)) & (1 << res));
+
+    return res;
+}
+
+static inline int is_master(int idx)
+{
+    return (idx % RATIO == 0) ? 1 : 0;
 }
 
 static inline long
@@ -274,7 +290,7 @@ static void fill_cqe(int ctx_id, esca_table_entry_t* ent)
     smp_store_release(&dest->rstatus, BENTRY_BUSY);
 }
 
-static void copy_table_entry_and_advance(int ctx_idx, int wrk_idx, esca_table_entry_t* ent)
+static void copy_table_entry_and_advance(int ctx_idx, int wrk_idx, int main_id, esca_table_entry_t* ent)
 {
     int tail = ctx[ctx_idx]->df_tail[wrk_idx];
     esca_table_entry_t* dst = &ctx[ctx_idx]->deferred_list[wrk_idx][tail];
@@ -284,6 +300,9 @@ static void copy_table_entry_and_advance(int ctx_idx, int wrk_idx, esca_table_en
 
     for (int i = 0; i < 6; i++)
         dst->args[i] = ent->args[i];
+
+    /* store id of main_worker who dispatch this task */
+    dst->pid = main_id;
 
     ctx[ctx_idx]->df_tail[wrk_idx] = (ctx[ctx_idx]->df_tail[wrk_idx] + 1) & ctx[ctx_idx]->df_mask;
     // FIXME: duplicate?
@@ -297,9 +316,8 @@ static int get_ready_qlen(esca_table_t* T, int id)
 
     head_index = (T->head_table * MAX_TABLE_ENTRY) + T->head_entry;
 
-    spin_lock_irq(&ctx[id]->cq_lock);
+    // FIXME: do we need a lock?
     tail_index = (T->tail_table * MAX_TABLE_ENTRY) + T->tail_entry;
-    spin_unlock_irq(&ctx[id]->cq_lock);
 
     return (tail_index >= head_index) ? tail_index - head_index : MAX_TABLE_ENTRY * MAX_TABLE_LEN - head_index + tail_index;
 }
@@ -323,112 +341,119 @@ static int get_ready_qlen_and_advance(esca_table_t* T, int id)
 static int main_worker(void* arg)
 {
     allow_signal(SIGKILL);
+
     int offloaded = 0, res;
-    int cur_cpuid = ((esca_wkr_args_t*)arg)->ctx_id;
-    unsigned long timeout = 0;
+    int ctx_id = ((esca_wkr_args_t*)arg)->ctx_id;
+    int wrk_id = ((esca_wkr_args_t*)arg)->wrk_id;
+    int master_id = ctx_id;
+
+    unsigned long timeout = jiffies + sq[wrk_id]->idle_time;
 
     if (ESCA_LOCALIZE)
-        set_cpus_allowed_ptr(current, cpumask_of(cur_cpuid / RATIO) + AFF_OFF);
+        set_cpus_allowed_ptr(current, cpumask_of(ctx_id) + AFF_OFF);
     else
-        set_cpus_allowed_ptr(current, cpumask_of(cur_cpuid) + AFF_OFF);
+        set_cpus_allowed_ptr(current, cpumask_of(wrk_id) + AFF_OFF);
 
     printk("In main-worker, pid = %d, bound at cpu %d, cur_cpupid = %d\n",
-        current->pid, smp_processor_id(), cur_cpuid);
+        current->pid, smp_processor_id(), ESCA_LOCALIZE ? ctx_id : wrk_id);
 
     DEFINE_WAIT(wait);
 
     while (1) {
-        int i = sq[cur_cpuid]->head_table;
-        int j = sq[cur_cpuid]->head_entry;
+        int i = sq[wrk_id]->head_table;
+        int j = sq[wrk_id]->head_entry;
 
-        while (smp_load_acquire(&sq[cur_cpuid]->tables[i][j].rstatus) == BENTRY_EMPTY) {
+        while (smp_load_acquire(&sq[wrk_id]->tables[i][j].rstatus) == BENTRY_EMPTY) {
             if (signal_pending(current)) {
                 printk("detect signal\n");
                 goto main_worker_exit;
             }
-            // FIXME:
+
+            WRITE_ONCE(sq[wrk_id]->flags, sq[wrk_id]->flags | CTX_FLAGS_MAIN_WOULD_SLEEP);
+
             if (!time_after(jiffies, timeout)) {
-                // some blocked task was completed from wq worker
-                // FIXME: why can't we use (ffs(ctx[cur_cpuid]->wq_has_finished) < 32) => arch dependent, not work for ARM64? it seems __builtin_ctz has problem
-                if (READ_ONCE(ctx[cur_cpuid]->wq_has_finished) != 0) { // <- faster ?
-                    // if(ffs(ctx[cur_cpuid]->wq_has_finished) < 32) { // <- slower ?
-                    spin_lock_irq(&ctx[cur_cpuid]->comp_lock);
-                    ctx[cur_cpuid]->wq_has_finished = 0;
-                    spin_unlock_irq(&ctx[cur_cpuid]->comp_lock);
-                    // WRITE_ONCE(ctx[cur_cpuid]->status, ctx[cur_cpuid]->status & (~CTX_FLAGS_MAIN_WOULD_SLEEP));
-                    // smp_mb();
+                // master entering only
+                if (is_master(wrk_id) && (READ_ONCE(sq[wrk_id]->wq_has_finished) != 0 || READ_ONCE(sq[wrk_id]->main_has_finished) != 0)) {
+                    // FIXME: do we need lock to protect `wq_has_finished`?
+                    sq[wrk_id]->main_has_finished = sq[wrk_id]->wq_has_finished = 0;
                     goto main_done_entry;
                 }
 
                 // still don't need to sleep
-                WRITE_ONCE(ctx[cur_cpuid]->status, ctx[cur_cpuid]->status | CTX_FLAGS_MAIN_WOULD_SLEEP);
+                // WRITE_ONCE(sq[wrk_id]->flags, sq[wrk_id]->flags | CTX_FLAGS_MAIN_WOULD_SLEEP);
                 smp_mb();
                 cond_resched();
                 continue;
             }
 
-            prepare_to_wait(&worker_wait[cur_cpuid], &wait, TASK_INTERRUPTIBLE);
-            WRITE_ONCE(sq[cur_cpuid]->flags, sq[cur_cpuid]->flags | ESCA_WORKER_NEED_WAKEUP);
+            // waken by wq-worker imply that there are some completed tasks
+            // FIXME: do we need to consider multiple wq worker wakeup it and the correctness of cq len
+            // master entering only
 
-            if (smp_load_acquire(&sq[cur_cpuid]->tables[i][j].rstatus) == BENTRY_EMPTY) {
+            prepare_to_wait(&main_worker_wait[wrk_id], &wait, TASK_INTERRUPTIBLE);
+            WRITE_ONCE(sq[wrk_id]->flags, sq[wrk_id]->flags | MAIN_WORKER_NEED_WAKEUP);
+
+            if (smp_load_acquire(&sq[wrk_id]->tables[i][j].rstatus) == BENTRY_EMPTY) {
+                // printk("main-%d go to sleep\n", wrk_id);
                 schedule();
-                // wake up by `wake_up` in batch_start or wq_worker
-                finish_wait(&worker_wait[cur_cpuid], &wait);
+                // wake up by `wake_up` in batch_start or wq_worker or slave-main_worker
+                finish_wait(&main_worker_wait[wrk_id], &wait);
+                // printk("main-%d is waken up\n", wrk_id);
 
                 // clear need_wakeup
                 // FIXME: need write barrier?
-                WRITE_ONCE(sq[cur_cpuid]->flags, sq[cur_cpuid]->flags & ~ESCA_WORKER_NEED_WAKEUP);
-                timeout = jiffies + sq[cur_cpuid]->idle_time;
-#if 1
-                // waken by wq-worker imply that there are some completed tasks
-                // FIXME: do we need to consider multiple wq worker wakeup it and the correctness of cq len
-                if (READ_ONCE(ctx[cur_cpuid]->wq_has_finished) != 0) {
-                    spin_lock_irq(&ctx[cur_cpuid]->comp_lock);
-                    ctx[cur_cpuid]->wq_has_finished = 0;
-                    spin_unlock_irq(&ctx[cur_cpuid]->comp_lock);
-                    // WRITE_ONCE(ctx[cur_cpuid]->status, ctx[cur_cpuid]->status & (~CTX_FLAGS_MAIN_WOULD_SLEEP));
+                WRITE_ONCE(sq[wrk_id]->flags, sq[wrk_id]->flags & ~MAIN_WORKER_NEED_WAKEUP);
+                timeout = jiffies + sq[wrk_id]->idle_time;
+
+                if (is_master(wrk_id) && (READ_ONCE(sq[wrk_id]->wq_has_finished) != 0 || READ_ONCE(sq[wrk_id]->main_has_finished) != 0)) {
+                    // FIXME: do we need lock to protect `wq_has_finished`?
+                    sq[wrk_id]->main_has_finished = sq[wrk_id]->wq_has_finished = 0;
                     goto main_done_entry;
                 }
-#endif
+
                 continue;
             }
 
             // condition satisfied, don't schedule
-            finish_wait(&worker_wait[cur_cpuid], &wait);
-            WRITE_ONCE(sq[cur_cpuid]->flags, sq[cur_cpuid]->flags & ~ESCA_WORKER_NEED_WAKEUP);
+            finish_wait(&main_worker_wait[wrk_id], &wait);
+            WRITE_ONCE(sq[wrk_id]->flags, sq[wrk_id]->flags & ~MAIN_WORKER_NEED_WAKEUP);
         }
+        WRITE_ONCE(sq[wrk_id]->flags, sq[wrk_id]->flags & ~CTX_FLAGS_MAIN_WOULD_SLEEP);
 
-        WRITE_ONCE(ctx[cur_cpuid]->status, ctx[cur_cpuid]->status & ~CTX_FLAGS_MAIN_WOULD_SLEEP);
     submitted_again:
-        should_be_submitted[cur_cpuid] = get_ready_qlen(sq[cur_cpuid], cur_cpuid);
-        // printk("should be submitted = %d\n", should_be_submitted[cur_cpuid]);
-        while (should_be_submitted[cur_cpuid] != 0) {
-            esca_table_entry_t* ent = &sq[cur_cpuid]->tables[i][j];
+
+        while (smp_load_acquire(&sq[wrk_id]->tables[i][j].rstatus) != BENTRY_EMPTY) {
+            esca_table_entry_t* ent = &sq[wrk_id]->tables[i][j];
 
             res = indirect_call(syscall_table_ptr[ent->sysnum], ent->nargs, ent->args);
 
             if (res == -EAGAIN) {
-                // printk("Do syscall-%d, fd is %d, resource is not available now...\n", ent->sysnum, ent->args[0]);
+                int nxt_wq;
 
-                int nxt_wq = ffs(ctx[cur_cpuid]->wq_status);
-                // printk("dispatch sys[%d] to wq[%d]\n", ent->sysnum, nxt_wq);
+                spin_lock_irq(&ctx[ctx_id]->wq_status_lock);
+                nxt_wq = ffs(ctx[ctx_id]->wq_status);
+                WRITE_ONCE(ctx[ctx_id]->wq_status, ctx[ctx_id]->wq_status & ~((unsigned int)1 << nxt_wq));
+                spin_unlock_irq(&ctx[ctx_id]->wq_status_lock);
+
+                // printk("main-%d dispatch sys[%d] to wq[%d]\n", wrk_id, ent->sysnum, nxt_wq);
                 if (nxt_wq >= 32) {
                     printk("Workqueue workers are exhausted\n");
                     // TODO: error handling
                 }
 
-                offloaded++;
-                copy_table_entry_and_advance(cur_cpuid, nxt_wq, ent);
+                copy_table_entry_and_advance(ctx_id, nxt_wq, wrk_id, ent);
 
                 /*
                     Make sure the status of a deferred entry has become BUSY, this prevent
                     the wq-worker entering empty-loop to set it as non-blocking worker
                 */
-                smp_mb();
-
+                // smp_mb();
+#if 0
                 // clear bit (1 << nxt_wq)
-                WRITE_ONCE(ctx[cur_cpuid]->wq_status, ctx[cur_cpuid]->wq_status & ~(1 << nxt_wq));
-
+                // spin_lock_irq(&ctx[ctx_id]->wq_status_lock);
+                // WRITE_ONCE(ctx[ctx_id]->wq_status, ctx[ctx_id]->wq_status & ~(1 << nxt_wq));
+                // spin_unlock_irq(&ctx[ctx_id]->wq_status_lock);
+#endif
                 smp_mb();
                 if (!(READ_ONCE(work_node_reg[nxt_wq]->status) & WQ_FLAGS_IS_RUNNING)) {
                     WRITE_ONCE(work_node_reg[nxt_wq]->status, work_node_reg[nxt_wq]->status | WQ_FLAGS_IS_RUNNING);
@@ -437,11 +462,13 @@ static int main_worker(void* arg)
             } else {
                 offloaded++;
                 ent->sysret = res;
-                fill_cqe(cur_cpuid, ent);
+                fill_cqe(ctx_id, ent);
 
-                spin_lock_irq(&ctx[cur_cpuid]->comp_lock);
-                ctx[cur_cpuid]->comp_num++;
-                spin_unlock_irq(&ctx[cur_cpuid]->comp_lock);
+                // FIXME: move out of this loop, and replacing with `ctx[ctx_id]->comp_num += offloaded`
+                spin_lock_irq(&ctx[ctx_id]->comp_lock);
+                ctx[ctx_id]->comp_num++;
+                spin_unlock_irq(&ctx[ctx_id]->comp_lock);
+
 #if 0
                 printk(KERN_INFO "Index %d,%d do syscall %d : %d = (%d, %d, %ld, %d) at cpu%d\n", i, j,
                     ent->sysnum, res, ent->args[0], ent->args[1], ent->args[2], ent->args[3], smp_processor_id());
@@ -450,7 +477,7 @@ static int main_worker(void* arg)
 
             // FIXME: need barrier?
             ent->rstatus = BENTRY_EMPTY;
-            should_be_submitted[cur_cpuid]--;
+            // should_be_submitted[wrk_id]--;
 
             if (j == MAX_TABLE_ENTRY - 1) {
                 i = (i == MAX_TABLE_LEN - 1) ? 0 : i + 1;
@@ -459,61 +486,60 @@ static int main_worker(void* arg)
                 j++;
             }
 
-            short done = 1; // 1 refers to all tasks had been issued
-            int threshold, cache_mini_ret;
+            // master entering only
+            if (wrk_id % RATIO == 0 && smp_load_acquire(&sq[wrk_id]->tables[i][j].rstatus) == BENTRY_EMPTY) {
 
-            // FIXME: cache_mini_ret might be outdated
-            cache_mini_ret = mini_ret;
+                // printk("main-%d entering waiting loop\n", wrk_id);
+            main_done_entry:
+                // sq[wrk_id]->head_table = i;
+                // sq[wrk_id]->head_entry = j;
 
-            threshold = (cache_mini_ret < 0) ? offloaded : cache_mini_ret;
+                // printk("main-%d entering main_done_entry\n", wrk_id);
+                //     FIXME: threshold always be 1
+                while (ctx[ctx_id]->comp_num < 1) {
+                    cond_resched();
 
-            if (cur_cpuid % RATIO == 0) {
-                for (int k = cur_cpuid; k < cur_cpuid + RATIO; k++) {
-                    if (should_be_submitted[k] != 0) {
-                        done = 0;
+                    if (smp_load_acquire(&sq[wrk_id]->tables[i][j].rstatus) != BENTRY_EMPTY)
+                        goto submitted_again;
+
+                    if (READ_ONCE(sq[wrk_id]->wq_has_finished) != 0 || READ_ONCE(sq[wrk_id]->main_has_finished) != 0) {
+                        sq[wrk_id]->main_has_finished = sq[wrk_id]->wq_has_finished = 0;
                         break;
                     }
+
+                    if (signal_pending(current))
+                        goto main_worker_exit;
                 }
-                // FIXME: threshold will not decresed
-                // printk("threshold=%d, cache_mini_ret=%d, offloaded=%d, done=%d\n", threshold, cache_mini_ret, offloaded, done);
-                if (done == 1) {
-                    sq[cur_cpuid]->head_table = i;
-                    sq[cur_cpuid]->head_entry = j;
-                main_done_entry:
-                    while (ctx[cur_cpuid]->comp_num < threshold) {
-                        cond_resched();
+                // printk("main-%d leaving main_done_entry\n", wrk_id);
+                //    FIXME: is lock needed?
+                spin_lock_irq(&ctx[ctx_id]->comp_lock);
+                ctx[ctx_id]->comp_num = 0;
+                spin_unlock_irq(&ctx[ctx_id]->comp_lock);
 
-                        if (smp_load_acquire(&sq[cur_cpuid]->tables[i][j].rstatus) != BENTRY_EMPTY)
-                            goto submitted_again;
-
-                        if (signal_pending(current))
-                            goto main_worker_exit;
-                    }
-
-                    // FIXME: is lock needed?
-
-                    spin_lock_irq(&ctx[cur_cpuid]->comp_lock);
-                    ctx[cur_cpuid]->comp_num = 0;
-                    spin_unlock_irq(&ctx[cur_cpuid]->comp_lock);
-
-                    // FIXME: is not important for `batch_flush_and_wait_some(1);`
-                    // remaining offloaded tasks
-#if 0
-                    if (cache_mini_ret >= 0)
-                        offloaded -= cache_mini_ret;
-                    else
-                        offloaded = 0;
-#endif
-
-                    // printk("wakeup user[%d]\n", cur_cpuid);
-                    WRITE_ONCE(ctx[cur_cpuid]->status, ctx[cur_cpuid]->status |= CTX_FLAGS_MAIN_DONE);
-                    smp_mb(); // FIXME: is this needed?
-                    wake_up_interruptible(&wq[cur_cpuid]);
-                }
+                WRITE_ONCE(ctx[ctx_id]->status, ctx[ctx_id]->status | CTX_FLAGS_MAIN_DONE);
+                smp_mb(); // FIXME: is this needed?
+                wake_up_interruptible(&wq[ctx_id]);
             }
 
-            timeout = jiffies + sq[cur_cpuid]->idle_time;
+            timeout = jiffies + sq[wrk_id]->idle_time;
         }
+
+        if (offloaded > 0 && !is_master(wrk_id)) {
+            // force master leaving empty loop
+            // WRITE_ONCE(sq[master_id]->flags, sq[master_id]->flags | CTX_FLAGS_MASTER_SHOULD_LEAVE_EMP);
+            // FIXME: why do we need this?
+            sq[master_id]->main_has_finished |= ((unsigned int)1 << wrk_id);
+            smp_mb();
+            // do we need to wake up main-worker?
+            if (READ_ONCE(sq[master_id]->flags) & MAIN_WORKER_NEED_WAKEUP) {
+                // printk("need to wake up the main_worker-%d from wq_worker-%d\n", master_id, wrk_id);
+                wake_up(&main_worker_wait[master_id]);
+            }
+        }
+        offloaded = 0;
+
+        sq[wrk_id]->head_table = i;
+        sq[wrk_id]->head_entry = j;
         cond_resched();
 
         if (signal_pending(current)) {
@@ -533,9 +559,11 @@ static int wq_worker(void* arg)
     allow_signal(SIGKILL);
 
     int ret = 0, head;
+    int main_id, master_id;
+    unsigned int from_main = 0; // bitmap, if bit set, the task of that main_worker dispatching is completed
     int ctx_id = ((esca_wkr_args_t*)arg)->ctx_id;
     int wrk_id = ((esca_wkr_args_t*)arg)->wrk_id;
-    unsigned long timeout = 0;
+    unsigned long timeout = jiffies + ctx[ctx_id]->idle_time;
 
     DEFINE_WAIT(wq_wait);
     init_waitqueue_head(&wq_worker_wq[wrk_id]);
@@ -543,17 +571,16 @@ static int wq_worker(void* arg)
     esca_table_entry_t* ent;
     struct list_head* self = ((esca_wkr_args_t*)arg)->self;
 
+    master_id = ctx_id;
     // TODO: set affinity
-    printk("wq-%d is launching, running on CPU-%d\n", wrk_id, smp_processor_id());
+    // printk("wq-%d is launching, running on CPU-%d\n", wrk_id, smp_processor_id());
 
     while (1) {
     wq_worker_advance:
         head = ctx[ctx_id]->df_head[wrk_id];
         ent = &ctx[ctx_id]->deferred_list[wrk_id][head];
-        // printk("Cache_comp_num = %d, rstatus = %d\n", work_node_reg[wrk_id]->cache_comp_num, ent->rstatus);
+
         while (smp_load_acquire(&ent->rstatus) == BENTRY_EMPTY) {
-            // update workqueue worker status
-            WRITE_ONCE(ctx[ctx_id]->wq_status, ctx[ctx_id]->wq_status | ((unsigned int)1 << wrk_id));
             // hybrid (busy waiting + sleep & wait)
             if (signal_pending(current)) {
                 printk("detect signal from wq_worker\n");
@@ -561,31 +588,35 @@ static int wq_worker(void* arg)
             }
 
             /*
-                In current dispatch protocol, task won't be appended to the wq-worker which already has blocking task.
+                In current dispatching protocol, task won't be appended to the wq-worker which already has blocking task.
                 Thus, only check the completion while there is no deferred job.
             */
             if (work_node_reg[wrk_id]->cache_comp_num != 0) {
                 spin_lock_irq(&ctx[ctx_id]->comp_lock);
                 ctx[ctx_id]->comp_num += work_node_reg[wrk_id]->cache_comp_num;
                 spin_unlock_irq(&ctx[ctx_id]->comp_lock);
-                // printk("There is %d task completed from wq worker\n", work_node_reg[wrk_id]->cache_comp_num);
-                if (READ_ONCE(ctx[ctx_id]->status) & CTX_FLAGS_MAIN_WOULD_SLEEP) {
-                    // WRITE_ONCE(ctx[ctx_id]->status, ctx[ctx_id]->status | CTX_FLAGS_WAKEUP_FROM_WQ);
-                    // FIXME: do we need a lock?
-                    // printk("the main worker is in the empty loop\n");
-                    spin_lock_irq(&ctx[ctx_id]->comp_lock);
-                    ctx[ctx_id]->wq_has_finished |= ((unsigned int)1 << wrk_id);
-                    spin_unlock_irq(&ctx[ctx_id]->comp_lock);
-                    // wake_up_interruptible(&wq[ctx_id]);
-                    smp_mb();
+
+                sq[master_id]->wq_has_finished |= ((unsigned int)1 << wrk_id);
+                smp_mb();
+
+                if (READ_ONCE(sq[master_id]->flags) & CTX_FLAGS_MAIN_WOULD_SLEEP) {
                     // do we need to wake up main-worker?
-                    if (READ_ONCE(sq[ctx_id]->flags) & ESCA_WORKER_NEED_WAKEUP) {
-                        printk("need to wake up the main worker from wq-worker\n");
-                        wake_up(&worker_wait[ctx_id]);
+                    if (READ_ONCE(sq[master_id]->flags) & MAIN_WORKER_NEED_WAKEUP) {
+                        // printk("need to wake up the main_worker-%d from wq_worker-%d\n", master_id, wrk_id);
+                        wake_up(&main_worker_wait[master_id]);
                     }
                 }
+
                 work_node_reg[wrk_id]->cache_comp_num = 0;
+                /*
+                    Make sure `comp_num` is updated, then allow the incoming tasks to be dispatched to this wq
+                */
+                smp_mb();
+                spin_lock_irq(&ctx[ctx_id]->wq_status_lock);
+                WRITE_ONCE(ctx[ctx_id]->wq_status, ctx[ctx_id]->wq_status | ((unsigned int)1 << wrk_id));
+                spin_unlock_irq(&ctx[ctx_id]->wq_status_lock);
             }
+
             // force to sleep in first-entrance
             if (!time_after(jiffies, timeout)) {
                 cond_resched();
@@ -595,9 +626,12 @@ static int wq_worker(void* arg)
             goto wq_worker_sleep;
         }
 
-        WRITE_ONCE(ctx[ctx_id]->wq_status, ctx[ctx_id]->wq_status & ~((unsigned int)1 << wrk_id));
-        smp_mb();
+        // spin_lock_irq(&ctx[ctx_id]->wq_status_lock);
+        // WRITE_ONCE(ctx[ctx_id]->wq_status, ctx[ctx_id]->wq_status & ~((unsigned int)1 << wrk_id));
+        // spin_unlock_irq(&ctx[ctx_id]->wq_status_lock);
+        // smp_mb();
 
+        // WRITE_ONCE(ctx[ctx_id]->wq_status, ctx[ctx_id]->wq_status & ~(1 << wrk_id));
         do {
             ret = indirect_call(syscall_table_ptr[ent->sysnum], ent->nargs, ent->args);
 
@@ -613,6 +647,7 @@ static int wq_worker(void* arg)
 
             // FIXME: update cache_comp_num?
         } while (1);
+        // WRITE_ONCE(ctx[ctx_id]->wq_status, ctx[ctx_id]->wq_status | (1 << wrk_id));
 #if 0
         printk(KERN_INFO "In wq-%d, do syscall %d : %d = (%d, %d, %ld, %d) at cpu%d\n", wrk_id,
             ent->sysnum, ent->sysret, ent->args[0], ent->args[1], ent->args[2], ent->args[3], smp_processor_id());
@@ -626,7 +661,7 @@ static int wq_worker(void* arg)
         work_node_reg[wrk_id]->cache_comp_num++;
         ent->rstatus = BENTRY_EMPTY;
         smp_mb();
-        // printk("work_node_reg[%d]->cache_comp_num = %d\n", wrk_id, work_node_reg[wrk_id]->cache_comp_num);
+
         timeout = jiffies + ctx[ctx_id]->idle_time;
         // continue;
         goto wq_worker_advance;
@@ -636,7 +671,12 @@ static int wq_worker(void* arg)
 
         // smp_store_release(&work_node_reg[wrk_id]->status, IDLE);
         WRITE_ONCE(work_node_reg[wrk_id]->status, work_node_reg[wrk_id]->status & (~WQ_FLAGS_IS_RUNNING));
+
+        spin_lock_irq(&ctx[ctx_id]->wq_status_lock);
+        WRITE_ONCE(ctx[ctx_id]->wq_status, ctx[ctx_id]->wq_status | ((unsigned int)1 << wrk_id));
+        spin_unlock_irq(&ctx[ctx_id]->wq_status_lock);
         smp_mb();
+
         schedule();
 
         // wake up by main_worker
@@ -669,24 +709,43 @@ asmlinkage long sys_esca_register(const struct __user pt_regs* regs)
 
     // FIXME: check if p1[0] is needed
     int n_page, id = p1[2], reg_type = p1[3];
+    int ctx_idx, wrk_idx;
 
     // FIXME: release
+    // FIXME: release me if registering CQ
     esca_wkr_args_t* main_wrk_args = (esca_wkr_args_t*)kmalloc(sizeof(esca_wkr_args_t), GFP_KERNEL);
-    main_wrk_args->ctx_id = id;
+    ctx_idx = main_wrk_args->ctx_id = id / RATIO;
+    wrk_idx = main_wrk_args->wrk_id = id;
 
-    esca_table_t** Q = (reg_type == REG_SQ) ? sq : cq;
+    esca_table_t** Q;
+
+    if (reg_type == REG_SQ) {
+        Q = sq;
+    } else if (reg_type == REG_CQ) {
+        Q = cq;
+        id = id / RATIO;
+    } else if (reg_type == REG_LAUNCH) {
+        kfree(main_wrk_args);
+        goto launching_worker;
+    }
 
     if (p1[0]) {
         /* header is not null */
         get_user_pages((unsigned long)(p1[0]), 1, FOLL_FORCE | FOLL_WRITE, shared_info_pinned_pages, NULL);
 
         esca_table_t* header = (esca_table_t*)kmap(shared_info_pinned_pages[0]);
-        for (int i = id; i < id + RATIO; i++) {
-            Q[i] = header + i - id;
+
+        if (reg_type == REG_SQ) {
+            for (int i = id; i < id + RATIO; i++) {
+                Q[i] = header + i - id;
+                init_waitqueue_head(&main_worker_wait[i]);
+            }
+        } else {
+            Q[id] = header;
         }
     } else {
         /* make sure header has been register */
-        while (!Q[id]) {
+        while (!Q[ctx_idx]) {
             cond_resched();
         }
     }
@@ -709,54 +768,60 @@ asmlinkage long sys_esca_register(const struct __user pt_regs* regs)
 
     Q[id]->head_table = Q[id]->tail_table = 0;
     Q[id]->head_entry = Q[id]->tail_entry = 0;
-    Q[id]->flags = 0 | ESCA_WORKER_NEED_WAKEUP;
+    Q[id]->wq_has_finished = 0;
+    Q[id]->main_has_finished = 0;
     Q[id]->idle_time = msecs_to_jiffies(DEFAULT_MAIN_IDLE_TIME);
+    WRITE_ONCE(Q[id]->flags, 0 | MAIN_WORKER_NEED_WAKEUP | CTX_FLAGS_MAIN_WOULD_SLEEP);
 
     if (reg_type == REG_CQ)
         return 0;
 
-    for (int i = 0; i < CPU_NUM_LIMIT; i++) {
-        worker_task[i] = NULL;
-    }
+    /*
+        for (int i = 0; i < CPU_NUM_LIMIT; i++) {
+            worker_task[i] = NULL;
+        }
+    */
 
-    init_waitqueue_head(&worker_wait[id]);
-    init_waitqueue_head(&wq[id]);
+    init_waitqueue_head(&wq[ctx_idx]);
     // FIXME: should forward the initialization of `wq_worker_wq`?
 
     // setup main offloading-thread
     worker_task[id] = create_io_thread_ptr(main_worker, main_wrk_args, -1);
+    should_be_submitted[id] = 0;
 
     // setup context of fastio
-    should_be_submitted[id] = 0;
-    ctx[id] = kmalloc(sizeof(struct fastio_ctx), GFP_KERNEL);
-    ctx[id]->df_mask = MAX_DEFERRED_NUM - 1;
-    ctx[id]->comp_num = 0;
-    ctx[id]->idle_time = msecs_to_jiffies(DEFAULT_WQ_IDLE_TIME);
+    if (wrk_idx % RATIO == 0) {
+        ctx[ctx_idx] = kmalloc(sizeof(struct fastio_ctx), GFP_KERNEL);
+        ctx[ctx_idx]->df_mask = MAX_DEFERRED_NUM - 1;
+        ctx[ctx_idx]->comp_num = 0;
+        ctx[ctx_idx]->nxt_wq = 0;
+        ctx[ctx_idx]->idle_time = msecs_to_jiffies(DEFAULT_WQ_IDLE_TIME);
 
-    WRITE_ONCE(ctx[id]->status, CTX_FLAGS_MAIN_WOULD_SLEEP);
-    WRITE_ONCE(ctx[id]->wq_status, 0xffffffff);
-    WRITE_ONCE(ctx[id]->wq_has_finished, 0);
+        WRITE_ONCE(ctx[ctx_idx]->wq_status, 0xffffffff);
 
-    for (int i = 0; i < WORKQUEUE_DEFAULT_THREAD_NUMS; i++) {
-        ctx[id]->df_head[i] = ctx[id]->df_tail[i] = 0;
-        init_waitqueue_head(&wq_worker_wait[i]);
+        for (int i = 0; i < WORKQUEUE_DEFAULT_THREAD_NUMS; i++) {
+            ctx[ctx_idx]->df_head[i] = ctx[ctx_idx]->df_tail[i] = 0;
+            init_waitqueue_head(&wq_worker_wait[i]);
 
-        for (int j = 0; j < MAX_DEFERRED_NUM; j++) {
-            ctx[id]->deferred_list[i][j].rstatus = BENTRY_EMPTY;
+            for (int j = 0; j < MAX_DEFERRED_NUM; j++) {
+                ctx[ctx_idx]->deferred_list[i][j].rstatus = BENTRY_EMPTY;
+            }
         }
+        spin_lock_init(&ctx[ctx_idx]->cq_lock);
+        spin_lock_init(&ctx[ctx_idx]->df_lock);
+        spin_lock_init(&ctx[ctx_idx]->comp_lock);
+        spin_lock_init(&ctx[ctx_idx]->wq_status_lock);
+
+        create_worker_pool(WORKQUEUE_DEFAULT_THREAD_NUMS, ctx_idx);
     }
 
-    spin_lock_init(&ctx[id]->cq_lock);
-    spin_lock_init(&ctx[id]->df_lock);
-    spin_lock_init(&ctx[id]->comp_lock);
+    return 0;
 
-    create_worker_pool(WORKQUEUE_DEFAULT_THREAD_NUMS, id);
-
-    wake_up_new_task_ptr(worker_task[id]);
-
+launching_worker:
     for (int i = 0; i < WORKQUEUE_DEFAULT_THREAD_NUMS; i++)
         wake_up_new_task_ptr(work_node_reg[i]->task);
-
+    for (int i = (int)p1[0]; i < (int)p1[0] + RATIO; i++)
+        wake_up_new_task_ptr(worker_task[i]);
     return 0;
 }
 
@@ -805,8 +870,8 @@ asmlinkage void sys_esca_wakeup(const struct __user pt_regs* regs)
     int i = regs->regs[0];
 #endif
 
-    if (likely(READ_ONCE(sq[i]->flags) & ESCA_START_WAKEUP)) {
-        wake_up(&worker_wait[i]);
+    if (likely(READ_ONCE(sq[i]->flags) & START_WAKEUP_MAIN_WORKER)) {
+        wake_up(&main_worker_wait[i]);
     }
 }
 
@@ -833,15 +898,12 @@ asmlinkage long sys_esca_wait(const struct __user pt_regs* regs)
         prepare_to_wait(&wq[idx], &_tmp_wait, TASK_INTERRUPTIBLE);
         // FIXME: the second condition only correct when using `batch_flush_and_wait_some(1)`
         if ((READ_ONCE(ctx[idx]->status) & CTX_FLAGS_MAIN_DONE))
-            // || (READ_ONCE(ctx[idx]->status) & CTX_FLAGS_WAKEUP_FROM_WQ))
-            //((READ_ONCE(ctx[idx]->status) & CTX_FLAGS_MAIN_WOULD_SLEEP) &&
-            //(get_ready_qlen(cq[idx], idx) != 0)))
             break;
         if (!signal_pending(current)) {
             schedule();
             continue;
         }
-        break;
+        goto sys_esca_wait_exit;
     }
     finish_wait(&wq[idx], &_tmp_wait);
 
@@ -849,6 +911,9 @@ asmlinkage long sys_esca_wait(const struct __user pt_regs* regs)
     WRITE_ONCE(ctx[idx]->status, ctx[idx]->status & (~CTX_FLAGS_MAIN_DONE));
 
     return get_ready_qlen_and_advance(cq[idx], idx);
+
+sys_esca_wait_exit:
+    return 0;
 }
 
 asmlinkage void sys_esca_init_config(const struct __user pt_regs* regs)
