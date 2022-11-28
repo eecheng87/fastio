@@ -1,4 +1,4 @@
-SUBDIRS := module wrapper
+SUBDIRS := module
 TOPTARGETS := all clean
 
 PWD := $(shell pwd)
