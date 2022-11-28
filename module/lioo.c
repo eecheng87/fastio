@@ -294,7 +294,7 @@ static void copy_table_entry_and_advance(int ctx_idx, int wrk_idx, int main_id, 
 {
     int tail = ctx[ctx_idx]->df_tail[wrk_idx];
     esca_table_entry_t* dst = &ctx[ctx_idx]->deferred_list[wrk_idx][tail];
-    // printk("pushing sqe (%d) to deferred_list[%d][%d]\n", ent->sysnum, wrk_idx, tail);
+
     dst->nargs = ent->nargs;
     dst->sysnum = ent->sysnum;
 
@@ -305,18 +305,18 @@ static void copy_table_entry_and_advance(int ctx_idx, int wrk_idx, int main_id, 
     dst->pid = main_id;
 
     ctx[ctx_idx]->df_tail[wrk_idx] = (ctx[ctx_idx]->df_tail[wrk_idx] + 1) & ctx[ctx_idx]->df_mask;
-    // FIXME: duplicate?
-    // ent->rstatus = BENTRY_EMPTY;
+
     smp_store_release(&dst->rstatus, BENTRY_BUSY);
 }
 
+// don't use this function, not safe
 static int get_ready_qlen(esca_table_t* T, int id)
 {
     int head_index, tail_index;
 
     head_index = (T->head_table * MAX_TABLE_ENTRY) + T->head_entry;
 
-    // FIXME: do we need a lock?
+    // accessing `tail_index` needs a lock
     tail_index = (T->tail_table * MAX_TABLE_ENTRY) + T->tail_entry;
 
     return (tail_index >= head_index) ? tail_index - head_index : MAX_TABLE_ENTRY * MAX_TABLE_LEN - head_index + tail_index;
@@ -380,15 +380,10 @@ static int main_worker(void* arg)
                 }
 
                 // still don't need to sleep
-                // WRITE_ONCE(sq[wrk_id]->flags, sq[wrk_id]->flags | CTX_FLAGS_MAIN_WOULD_SLEEP);
                 smp_mb();
                 cond_resched();
                 continue;
             }
-
-            // waken by wq-worker imply that there are some completed tasks
-            // FIXME: do we need to consider multiple wq worker wakeup it and the correctness of cq len
-            // master entering only
 
             prepare_to_wait(&main_worker_wait[wrk_id], &wait, TASK_INTERRUPTIBLE);
             WRITE_ONCE(sq[wrk_id]->flags, sq[wrk_id]->flags | MAIN_WORKER_NEED_WAKEUP);
@@ -444,16 +439,9 @@ static int main_worker(void* arg)
                 copy_table_entry_and_advance(ctx_id, nxt_wq, wrk_id, ent);
 
                 /*
-                    Make sure the status of a deferred entry has become BUSY, this prevent
-                    the wq-worker entering empty-loop to set it as non-blocking worker
+                    The status of a deferred entry has become BUSY, from here
                 */
-                // smp_mb();
-#if 0
-                // clear bit (1 << nxt_wq)
-                // spin_lock_irq(&ctx[ctx_id]->wq_status_lock);
-                // WRITE_ONCE(ctx[ctx_id]->wq_status, ctx[ctx_id]->wq_status & ~(1 << nxt_wq));
-                // spin_unlock_irq(&ctx[ctx_id]->wq_status_lock);
-#endif
+
                 smp_mb();
                 if (!(READ_ONCE(work_node_reg[nxt_wq]->status) & WQ_FLAGS_IS_RUNNING)) {
                     WRITE_ONCE(work_node_reg[nxt_wq]->status, work_node_reg[nxt_wq]->status | WQ_FLAGS_IS_RUNNING);
@@ -474,10 +462,8 @@ static int main_worker(void* arg)
                     ent->sysnum, res, ent->args[0], ent->args[1], ent->args[2], ent->args[3], smp_processor_id());
 #endif
             }
-
             // FIXME: need barrier?
             ent->rstatus = BENTRY_EMPTY;
-            // should_be_submitted[wrk_id]--;
 
             if (j == MAX_TABLE_ENTRY - 1) {
                 i = (i == MAX_TABLE_LEN - 1) ? 0 : i + 1;
@@ -489,13 +475,9 @@ static int main_worker(void* arg)
             // master entering only
             if (wrk_id % RATIO == 0 && smp_load_acquire(&sq[wrk_id]->tables[i][j].rstatus) == BENTRY_EMPTY) {
 
-                // printk("main-%d entering waiting loop\n", wrk_id);
             main_done_entry:
-                // sq[wrk_id]->head_table = i;
-                // sq[wrk_id]->head_entry = j;
-
                 // printk("main-%d entering main_done_entry\n", wrk_id);
-                //     FIXME: threshold always be 1
+                // FIXME: current implementation only considering the threshold always be 1
                 while (ctx[ctx_id]->comp_num < 1) {
                     cond_resched();
 
@@ -526,13 +508,11 @@ static int main_worker(void* arg)
 
         if (offloaded > 0 && !is_master(wrk_id)) {
             // force master leaving empty loop
-            // WRITE_ONCE(sq[master_id]->flags, sq[master_id]->flags | CTX_FLAGS_MASTER_SHOULD_LEAVE_EMP);
-            // FIXME: why do we need this?
             sq[master_id]->main_has_finished |= ((unsigned int)1 << wrk_id);
             smp_mb();
+
             // do we need to wake up main-worker?
             if (READ_ONCE(sq[master_id]->flags) & MAIN_WORKER_NEED_WAKEUP) {
-                // printk("need to wake up the main_worker-%d from wq_worker-%d\n", master_id, wrk_id);
                 wake_up(&main_worker_wait[master_id]);
             }
         }
@@ -626,12 +606,6 @@ static int wq_worker(void* arg)
             goto wq_worker_sleep;
         }
 
-        // spin_lock_irq(&ctx[ctx_id]->wq_status_lock);
-        // WRITE_ONCE(ctx[ctx_id]->wq_status, ctx[ctx_id]->wq_status & ~((unsigned int)1 << wrk_id));
-        // spin_unlock_irq(&ctx[ctx_id]->wq_status_lock);
-        // smp_mb();
-
-        // WRITE_ONCE(ctx[ctx_id]->wq_status, ctx[ctx_id]->wq_status & ~(1 << wrk_id));
         do {
             ret = indirect_call(syscall_table_ptr[ent->sysnum], ent->nargs, ent->args);
 
@@ -647,7 +621,7 @@ static int wq_worker(void* arg)
 
             // FIXME: update cache_comp_num?
         } while (1);
-        // WRITE_ONCE(ctx[ctx_id]->wq_status, ctx[ctx_id]->wq_status | (1 << wrk_id));
+
 #if 0
         printk(KERN_INFO "In wq-%d, do syscall %d : %d = (%d, %d, %ld, %d) at cpu%d\n", wrk_id,
             ent->sysnum, ent->sysret, ent->args[0], ent->args[1], ent->args[2], ent->args[3], smp_processor_id());
@@ -669,7 +643,6 @@ static int wq_worker(void* arg)
     wq_worker_sleep:
         prepare_to_wait(&wq_worker_wq[wrk_id], &wq_wait, TASK_INTERRUPTIBLE);
 
-        // smp_store_release(&work_node_reg[wrk_id]->status, IDLE);
         WRITE_ONCE(work_node_reg[wrk_id]->status, work_node_reg[wrk_id]->status & (~WQ_FLAGS_IS_RUNNING));
 
         spin_lock_irq(&ctx[ctx_id]->wq_status_lock);
@@ -680,7 +653,6 @@ static int wq_worker(void* arg)
         schedule();
 
         // wake up by main_worker
-        // printk("wq-%d is waken up\n", wrk_id); // FIXME: remove later
         WRITE_ONCE(work_node_reg[wrk_id]->status, work_node_reg[wrk_id]->status | WQ_FLAGS_IS_RUNNING);
         timeout = jiffies + ctx[ctx_id]->idle_time;
         finish_wait(&wq_worker_wq[wrk_id], &wq_wait);
@@ -775,12 +747,6 @@ asmlinkage long sys_esca_register(const struct __user pt_regs* regs)
 
     if (reg_type == REG_CQ)
         return 0;
-
-    /*
-        for (int i = 0; i < CPU_NUM_LIMIT; i++) {
-            worker_task[i] = NULL;
-        }
-    */
 
     init_waitqueue_head(&wq[ctx_idx]);
     // FIXME: should forward the initialization of `wq_worker_wq`?
