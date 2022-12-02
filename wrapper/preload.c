@@ -205,7 +205,7 @@ esca_table_entry_t* get_cqe(int i, int j)
     return res;
 }
 
-#include "echo.c"
+#include "redis.c"
 
 void init_config(esca_config_t* c)
 {

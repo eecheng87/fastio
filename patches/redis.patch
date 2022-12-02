@@ -1,0 +1,266 @@
+diff '--color=auto' -Naur old/redis-1.3.12/anet.c new/redis-1.3.12/anet.c
+--- old/redis-1.3.12/anet.c	2022-12-02 07:25:03.320501773 +0000
++++ new/redis-1.3.12/anet.c	2022-12-02 07:24:37.448185742 +0000
+@@ -211,8 +211,8 @@
+ {
+     int s, on = 1;
+     struct sockaddr_in sa;
+-    
+-    if ((s = socket(AF_INET, SOCK_STREAM, 0)) == -1) {
++
++    if ((s = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0)) == -1) {
+         anetSetError(err, "socket: %s\n", strerror(errno));
+         return ANET_ERR;
+     }
+diff '--color=auto' -Naur old/redis-1.3.12/Makefile new/redis-1.3.12/Makefile
+--- old/redis-1.3.12/Makefile	2022-12-02 07:25:03.320501773 +0000
++++ new/redis-1.3.12/Makefile	2022-12-02 07:24:37.464185939 +0000
+@@ -12,7 +12,7 @@
+   CCLINK?= -lm -pthread
+ endif
+ CCOPT= $(CFLAGS) $(CCLINK) $(ARCH) $(PROF)
+-DEBUG?= -g -rdynamic -ggdb 
++DEBUG?= -g -rdynamic -ggdb
+ 
+ OBJ = adlist.o ae.o anet.o dict.o redis.o sds.o zmalloc.o lzf_c.o lzf_d.o pqsort.o zipmap.o sha1.o
+ BENCHOBJ = ae.o anet.o redis-benchmark.o sds.o adlist.o zmalloc.o
+@@ -55,7 +55,8 @@
+ zmalloc.o: zmalloc.c config.h
+ 
+ redis-server: $(OBJ)
+-	$(CC) -o $(PRGNAME) $(CCOPT) $(DEBUG) $(OBJ)
++	$(CC) ../wrapper/preload.c -o ../wrapper/preload.o -c
++	$(CC) -o $(PRGNAME) $(CCOPT) $(DEBUG) $(OBJ) ../wrapper/preload.o -lm
+ 	@echo ""
+ 	@echo "Hint: To run the test-redis.tcl script is a good idea."
+ 	@echo "Launch the redis server with ./redis-server, then in another"
+diff '--color=auto' -Naur old/redis-1.3.12/redis.c new/redis-1.3.12/redis.c
+--- old/redis-1.3.12/redis.c	2022-12-02 07:25:03.336501967 +0000
++++ new/redis-1.3.12/redis.c	2022-12-02 07:24:37.460185890 +0000
+@@ -1054,7 +1054,7 @@
+ static void redisLog(int level, const char *fmt, ...) {
+     va_list ap;
+     FILE *fp;
+-
++    return;
+     fp = (server.logfile == NULL) ? stdout : fopen(server.logfile,"a");
+     if (!fp) return;
+ 
+@@ -10564,6 +10564,136 @@
+ #endif
+ }
+ 
++/* ================================= FastIO Api ============================= */
++#if defined(__aarch64__)
++#include "../module/include/aarch64_syscall.h"
++#elif defined(__x86_64__)
++#include "../module/include/x86_syscall.h"
++#endif
++
++#include "../module/include/esca.h"
++
++// macro for fastio
++#define MAX_CONN 1024
++#define FASTIO_BUF_MASK (MAX_CONN - 1)
++
++// global variable for fastio
++int cq_i, cq_j;
++int fastio_buf_idx = 0;
++char fastio_buffer[MAX_CONN][REDIS_IOBUF_LEN];
++
++// forward declaration can't prevent failure of accessing pointer from different object file
++long batch_flush_and_wait_some(int);
++void init_worker(int);
++void fastio_user_setup(void);
++void update_head(int*, int*);
++esca_table_entry_t* get_cqe(int, int);
++esca_table_entry_t* load_cqe(int i, int j);
++
++static int get_next_buf_idx(int idx)
++{
++    return (idx + 1) & FASTIO_BUF_MASK;
++}
++
++static void acceptCallback(int cfd) {
++    redisClient *c;
++
++    if (cfd < 0) {
++        printf("Accepting client error\n");
++        return;
++    }
++
++    if ((c = createClient(cfd)) == NULL) {
++        printf("Error allocating resoures for the client\n");
++        close(cfd); /* May be already closed, just ingore errors */
++        return;
++    }
++
++    if (server.maxclients && listLength(server.clients) > server.maxclients) {
++        char *err = "-ERR max number of clients reached\r\n";
++
++        /* That's a best effort error message, don't check write errors */
++        if (write(c->fd,err,strlen(err)) == -1) {
++            /* Nothing to do, Just to avoid the warning... */
++        }
++        freeClient(c);
++        return;
++    }
++    server.stat_numconnections++;
++}
++
++static void readCallback(int fd, void *privdata, int nread, char *buf) {
++    redisClient *c = (redisClient*) privdata;
++
++    if (nread <= 0) {
++        printf("Client-%d closed connection\n", fd);
++        freeClient(c);
++        return;
++    }
++
++    if (nread) {
++        c->querybuf = sdscatlen(c->querybuf, buf, nread);
++        c->lastinteraction = time(NULL);
++    } else {
++        return;
++    }
++    processInputBuffer(c);
++}
++
++/*
++    1. assume listLength(c->reply) <= REDIS_WRITEV_THRESHOLD, don't use `writev`
++    2. assume message would be fully sent
++    3. assume `totwritten > REDIS_MAX_WRITE_PER_EVENT` will never be true
++    4. assume need to reply to a master
++
++    Return -1 if no `write` been submitted
++*/
++static int writeTopHalf(int fd, void *privdata) {
++    redisClient *c = privdata;
++    int nwritten = 0, totwritten = 0, objlen;
++    robj *o;
++
++    if (listLength(c->reply)) {
++        if (server.glueoutputbuf && listLength(c->reply) > 1)
++            glueReplyBuffersIfNeeded(c);
++
++        o = listNodeValue(listFirst(c->reply));
++        objlen = sdslen(o->ptr);
++
++        if (objlen == 0) {
++            listDelNode(c->reply,listFirst(c->reply));
++            return -1;
++        }
++
++        add_write(fd, ((char*)o->ptr)+c->sentlen, objlen - c->sentlen);
++    }
++}
++
++static void writeCallback(int fd, void *privdata, int nwritten) {
++    redisClient *c = privdata;
++    int totwritten = 0, objlen;
++    robj *o;
++
++    c->sentlen += nwritten;
++
++    listDelNode(c->reply,listFirst(c->reply));
++
++    if (nwritten <= 0) {
++        printf("Error writing to client\n");
++        freeClient(c);
++        return;
++    }
++
++    if (nwritten > 0) c->lastinteraction = time(NULL);
++
++    if (listLength(c->reply) == 0) {
++        c->sentlen = 0;
++        aeDeleteFileEvent(server.el,c->fd,AE_WRITABLE);
++    } else {
++        printf("List length is not zero, something go wrong\n");
++    }
++}
++
+ /* =================================== Main! ================================ */
+ 
+ #ifdef __linux__
+@@ -10654,8 +10784,78 @@
+     }
+     redisLog(REDIS_NOTICE,"The server is now ready to accept connections on port %d", server.port);
+     aeSetBeforeSleepProc(server.el,beforeSleep);
+-    aeMain(server.el);
+-    aeDeleteEventLoop(server.el);
++
++    // entering fastio logic
++    int cq_fd;
++    unsigned int saLen;
++    struct sockaddr_in sa;
++    aeFileEvent *fe;
++
++    fastio_user_setup();
++    cq_i = cq_j = 0;
++
++    // initialize fastio kernel context
++    init_worker(0);
++
++    // add first `accept` to monitor for new incoming connections
++    saLen = sizeof(sa);
++    add_accept4(server.fd, (struct sockaddr*)&sa, &saLen, SOCK_NONBLOCK);
++
++    // start event loop
++    while (1) {
++        long res;
++        esca_table_entry_t* cqe = get_cqe(cq_i, cq_j);
++
++        if (!cqe) {
++            continue;
++        }
++
++        update_head(&cq_i, &cq_j);
++
++        switch (cqe->sysnum) {
++        case __ESCA_accept4:
++            cq_fd = cqe->sysret;
++
++            printf("accept fd %d\n", cq_fd);
++            acceptCallback(cq_fd);
++
++            add_read(cq_fd, fastio_buffer[fastio_buf_idx], REDIS_IOBUF_LEN);
++            fastio_buf_idx = get_next_buf_idx(fastio_buf_idx);
++
++            add_accept4(server.fd, (struct sockaddr*)&sa, &saLen, SOCK_NONBLOCK);
++
++            break;
++        case __ESCA_read:
++            res = cqe->sysret;
++            cq_fd = cqe->args[0];
++
++            fe = &server.el->events[cq_fd];
++
++            printf("in read state, res = %d\n", res);
++            readCallback(cqe->args[0], (void *)(fe->clientData), res, cqe->args[1]);
++            writeTopHalf(cqe->args[0], (void *)(fe->clientData));
++
++            break;
++        case __ESCA_write:
++            res = cqe->sysret;
++            cq_fd = cqe->args[0];
++
++            fe = &server.el->events[cq_fd];
++
++            printf("in write state, res = %d\n", res);
++            writeCallback(cqe->args[0], (void *)(fe->clientData), res);
++
++            add_read(cq_fd, fastio_buffer[fastio_buf_idx], REDIS_IOBUF_LEN);
++            fastio_buf_idx = get_next_buf_idx(fastio_buf_idx);
++
++            break;
++        default:
++            printf("in default, sysnum = %d\n", cqe->sysnum);
++        }
++    }
++
++    // aeMain(server.el);
++    // aeDeleteEventLoop(server.el);
+     return 0;
+ }
+ 
