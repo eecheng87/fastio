@@ -424,17 +424,20 @@ static int main_worker(void* arg)
 
             if (res == -EAGAIN) {
                 int nxt_wq;
-
+            main_worker_dispatch_again:
                 spin_lock_irq(&ctx[ctx_id]->wq_status_lock);
                 nxt_wq = ffs(ctx[ctx_id]->wq_status);
+
+                if (nxt_wq >= 32) {
+                    // Workqueue workers are exhausted
+                    spin_unlock_irq(&ctx[ctx_id]->wq_status_lock);
+                    goto main_worker_dispatch_again;
+                }
+
                 WRITE_ONCE(ctx[ctx_id]->wq_status, ctx[ctx_id]->wq_status & ~((unsigned int)1 << nxt_wq));
                 spin_unlock_irq(&ctx[ctx_id]->wq_status_lock);
 
                 // printk("main-%d dispatch sys[%d] to wq[%d]\n", wrk_id, ent->sysnum, nxt_wq);
-                if (nxt_wq >= 32) {
-                    printk("Workqueue workers are exhausted\n");
-                    // TODO: error handling
-                }
 
                 copy_table_entry_and_advance(ctx_id, nxt_wq, wrk_id, ent);
 
