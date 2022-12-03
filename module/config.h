@@ -24,6 +24,7 @@ typedef struct esca_config {
     int default_main_worker_idle_time;
     int default_wq_worker_idle_time;
     int affinity_offset;
+    int wq_affinity_offset;
 } esca_config_t;
 
 static const esca_config_t default_config
@@ -35,7 +36,8 @@ static const esca_config_t default_config
           .max_ker_worker = 1,
           .default_main_worker_idle_time = 150,
           .default_wq_worker_idle_time = 150,
-          .affinity_offset = 0
+          .affinity_offset = 0,
+          .wq_affinity_offset = 20
       };
 
 #endif

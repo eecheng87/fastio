@@ -48,6 +48,7 @@ int RATIO;
 int DEFAULT_MAIN_IDLE_TIME;
 int DEFAULT_WQ_IDLE_TIME;
 int AFF_OFF;
+int WQ_AFF_OFF;
 
 /* restore original syscall for recover */
 void* syscall_register_ori;
@@ -555,8 +556,8 @@ static int wq_worker(void* arg)
     struct list_head* self = ((esca_wkr_args_t*)arg)->self;
 
     master_id = ctx_id;
-    // TODO: set affinity
-    // printk("wq-%d is launching, running on CPU-%d\n", wrk_id, smp_processor_id());
+
+    set_cpus_allowed_ptr(current, cpumask_of(WQ_AFF_OFF));
 
     while (1) {
     wq_worker_advance:
@@ -909,6 +910,7 @@ asmlinkage void sys_esca_init_config(const struct __user pt_regs* regs)
     DEFAULT_MAIN_IDLE_TIME = kconfig->default_main_worker_idle_time;
     DEFAULT_WQ_IDLE_TIME = kconfig->default_wq_worker_idle_time;
     AFF_OFF = kconfig->affinity_offset;
+    WQ_AFF_OFF = kconfig->wq_affinity_offset;
 
     printk("Localize: %s\n", ESCA_LOCALIZE ? "Enable" : "Disable");
     printk("MAX_TABLE_ENTRY: %d\n", MAX_TABLE_ENTRY);
@@ -916,6 +918,7 @@ asmlinkage void sys_esca_init_config(const struct __user pt_regs* regs)
     printk("MAX_USR_WORKER: %d\n", MAX_USR_WORKER);
     printk("MAX_KER_WORKER: %d\n", MAX_CPU_NUM);
     printk("AFF_OFF: %d\n", AFF_OFF);
+    printk("WQ_AFF_OFF: %d\n", WQ_AFF_OFF);
 
     if (ESCA_LOCALIZE)
         printk("# of K-worker per CPU: %d\n", RATIO);

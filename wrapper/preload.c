@@ -30,6 +30,7 @@ int RATIO;
 int DEFAULT_MAIN_IDLE_TIME;
 int DEFAULT_WQ_IDLE_TIME;
 int AFF_OFF;
+int WQ_AFF_OFF;
 
 esca_config_t* config;
 
@@ -220,6 +221,7 @@ void init_config(esca_config_t* c)
     DEFAULT_MAIN_IDLE_TIME = c->default_main_worker_idle_time;
     DEFAULT_WQ_IDLE_TIME = c->default_wq_worker_idle_time;
     AFF_OFF = c->affinity_offset;
+    WQ_AFF_OFF = c->wq_affinity_offset;
 
     printf("\033[0;33m");
     printf(" Localize: \033[0;37m%s\033[0;33m\n", ESCA_LOCALIZE ? "Enable" : "Disable");
@@ -228,6 +230,7 @@ void init_config(esca_config_t* c)
     printf(" MAX_USR_WORKER: \033[0;37m%d\033[0;33m\n", MAX_USR_WORKER);
     printf(" MAX_KER_WORKER: \033[0;37m%d\033[0;33m\n", MAX_CPU_NUM);
     printf(" AFF_OFF: \033[0;37m%d\033[0;33m\n", AFF_OFF);
+    printf(" WQ_AFF_OFF: \033[0;37m%d\033[0;33m\n", WQ_AFF_OFF);
 
     if (ESCA_LOCALIZE)
         printf(" # of K-worker per CPU: \033[0;37m%d\n", RATIO);
@@ -286,6 +289,8 @@ void fastio_user_setup(void)
                 config->default_wq_worker_idle_time = option.val;
             } else if (strcmp(option.key, "affinity_offset") == 0) {
                 config->affinity_offset = option.val;
+            } else if (strcmp(option.key, "wq_affinity_offset") == 0) {
+                config->wq_affinity_offset = option.val;
             } else {
                 printf("Invalid option: %s\n", option.key);
             }
