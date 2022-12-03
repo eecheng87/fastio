@@ -110,6 +110,8 @@ void init_worker(int idx)
     msgpool = (struct msghdr*)malloc(sizeof(struct msghdr) * MAX_POOL_MSG_SIZE);
     msg_offset = 0;
 
+    asm volatile("" ::: "memory");
+
     /* launch workers */
     syscall(__NR_esca_register, NULL, NULL, idx, REG_LAUNCH);
 
