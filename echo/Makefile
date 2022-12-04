@@ -8,7 +8,7 @@ io_uring_echo_server: io_uring_echo_server.c
 	$(CC) $< -o $@ ${CCFLAGS} -D_GNU_SOURCE -luring
 
 epoll_echo_server: epoll_echo_server.c
-	$(CC) $< -o $@ ${CCFLAGS} -D_GNU_SOURCE ../wrapper/libdummy.so
+	$(CC) $< -o $@ ${CCFLAGS} -D_GNU_SOURCE
 
 proactor_echo_server: proactor_echo_server.c
 	$(CC) ../wrapper/preload.c -o preload.o ${CCFLAGS} -c

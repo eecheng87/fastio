@@ -64,14 +64,13 @@ int main(int argc, char* argv[])
     if (epoll_ctl(epollfd, EPOLL_CTL_ADD, sock_listen_fd, &ev) == -1) {
         error("Error adding new listeding socket to epoll..\n");
     }
-    init_worker(0);
+
     while (1) {
         new_events = epoll_wait(epollfd, events, MAX_EVENTS, -1);
 
         if (new_events == -1) {
             error("Error in epoll_wait..\n");
         }
-        batch_start();
         for (int i = 0; i < new_events; ++i) {
             if (events[i].data.fd == sock_listen_fd) {
                 sock_conn_fd = accept4(sock_listen_fd, (struct sockaddr*)&client_addr, &client_len, SOCK_NONBLOCK);
@@ -95,7 +94,6 @@ int main(int argc, char* argv[])
                 }
             }
         }
-        batch_flush();
     }
 }
 
