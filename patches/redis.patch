@@ -1,6 +1,6 @@
 diff '--color=auto' -Naur old/redis-1.3.12/anet.c new/redis-1.3.12/anet.c
 --- old/redis-1.3.12/anet.c	2022-12-02 07:25:03.320501773 +0000
-+++ new/redis-1.3.12/anet.c	2022-12-02 07:24:37.448185742 +0000
++++ new/redis-1.3.12/anet.c	2022-12-05 08:49:23.590126788 +0000
 @@ -211,8 +211,8 @@
  {
      int s, on = 1;
@@ -13,8 +13,8 @@ diff '--color=auto' -Naur old/redis-1.3.12/anet.c new/redis-1.3.12/anet.c
          return ANET_ERR;
      }
 diff '--color=auto' -Naur old/redis-1.3.12/Makefile new/redis-1.3.12/Makefile
---- old/redis-1.3.12/Makefile	2022-12-02 07:25:03.320501773 +0000
-+++ new/redis-1.3.12/Makefile	2022-12-02 07:24:37.464185939 +0000
+--- old/redis-1.3.12/Makefile	2022-12-02 08:51:53.209610985 +0000
++++ new/redis-1.3.12/Makefile	2022-12-05 08:49:23.562126554 +0000
 @@ -12,7 +12,7 @@
    CCLINK?= -lm -pthread
  endif
@@ -28,7 +28,7 @@ diff '--color=auto' -Naur old/redis-1.3.12/Makefile new/redis-1.3.12/Makefile
  zmalloc.o: zmalloc.c config.h
  
  redis-server: $(OBJ)
--	$(CC) -o $(PRGNAME) $(CCOPT) $(DEBUG) $(OBJ)
+-	$(CC) -o $(PRGNAME) $(CCOPT) $(DEBUG) $(OBJ) -lm
 +	$(CC) ../wrapper/preload.c -o ../wrapper/preload.o -c
 +	$(CC) -o $(PRGNAME) $(CCOPT) $(DEBUG) $(OBJ) ../wrapper/preload.o -lm
  	@echo ""
@@ -36,7 +36,7 @@ diff '--color=auto' -Naur old/redis-1.3.12/Makefile new/redis-1.3.12/Makefile
  	@echo "Launch the redis server with ./redis-server, then in another"
 diff '--color=auto' -Naur old/redis-1.3.12/redis.c new/redis-1.3.12/redis.c
 --- old/redis-1.3.12/redis.c	2022-12-02 07:25:03.336501967 +0000
-+++ new/redis-1.3.12/redis.c	2022-12-02 07:24:37.460185890 +0000
++++ new/redis-1.3.12/redis.c	2022-12-05 08:49:23.562126554 +0000
 @@ -1054,7 +1054,7 @@
  static void redisLog(int level, const char *fmt, ...) {
      va_list ap;
@@ -183,7 +183,7 @@ diff '--color=auto' -Naur old/redis-1.3.12/redis.c new/redis-1.3.12/redis.c
  /* =================================== Main! ================================ */
  
  #ifdef __linux__
-@@ -10654,8 +10784,78 @@
+@@ -10654,8 +10784,75 @@
      }
      redisLog(REDIS_NOTICE,"The server is now ready to accept connections on port %d", server.port);
      aeSetBeforeSleepProc(server.el,beforeSleep);
@@ -221,7 +221,6 @@ diff '--color=auto' -Naur old/redis-1.3.12/redis.c new/redis-1.3.12/redis.c
 +        case __ESCA_accept4:
 +            cq_fd = cqe->sysret;
 +
-+            printf("accept fd %d\n", cq_fd);
 +            acceptCallback(cq_fd);
 +
 +            add_read(cq_fd, fastio_buffer[fastio_buf_idx], REDIS_IOBUF_LEN);
@@ -236,7 +235,6 @@ diff '--color=auto' -Naur old/redis-1.3.12/redis.c new/redis-1.3.12/redis.c
 +
 +            fe = &server.el->events[cq_fd];
 +
-+            printf("in read state, res = %d\n", res);
 +            readCallback(cqe->args[0], (void *)(fe->clientData), res, cqe->args[1]);
 +            writeTopHalf(cqe->args[0], (void *)(fe->clientData));
 +
@@ -247,7 +245,6 @@ diff '--color=auto' -Naur old/redis-1.3.12/redis.c new/redis-1.3.12/redis.c
 +
 +            fe = &server.el->events[cq_fd];
 +
-+            printf("in write state, res = %d\n", res);
 +            writeCallback(cqe->args[0], (void *)(fe->clientData), res);
 +
 +            add_read(cq_fd, fastio_buffer[fastio_buf_idx], REDIS_IOBUF_LEN);
