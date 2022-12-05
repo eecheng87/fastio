@@ -16,4 +16,4 @@ proactor_echo_server: proactor_echo_server.c
 	$(CC) -o proactor_echo_server proactor_echo_server.o preload.o
 
 clean:
-	rm rps io_uring_echo_server epoll_echo_server proactor_echo_server
+	rm rps io_uring_echo_server epoll_echo_server proactor_echo_server ../wrapper/target-preload.c

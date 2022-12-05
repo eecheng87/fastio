@@ -557,7 +557,7 @@ static int wq_worker(void* arg)
 
     master_id = ctx_id;
 
-    set_cpus_allowed_ptr(current, cpumask_of(WQ_AFF_OFF));
+    // set_cpus_allowed_ptr(current, cpumask_of(WQ_AFF_OFF));
 
     while (1) {
     wq_worker_advance:

@@ -208,7 +208,7 @@ esca_table_entry_t* get_cqe(int i, int j)
     return res;
 }
 
-#include "redis.c"
+#include "target-preload.c"
 
 void init_config(esca_config_t* c)
 {

@@ -15,6 +15,9 @@ $(TOPTARGETS): $(SUBDIRS)
 $(SUBDIRS):
 	$(MAKE) -C $@ $(MAKECMDGOALS)
 
+config:
+	ln -s $(shell pwd)/wrapper/$(TARGET).c wrapper/target-preload.c
+
 reload:
 	sudo dmesg -C
 	-sudo rmmod mlioo
