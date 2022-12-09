@@ -293,8 +293,16 @@ static void fill_cqe(int ctx_id, esca_table_entry_t* ent)
 
 static void copy_table_entry_and_advance(int ctx_idx, int wrk_idx, int main_id, esca_table_entry_t* ent)
 {
-    int tail = ctx[ctx_idx]->df_tail[wrk_idx];
-    esca_table_entry_t* dst = &ctx[ctx_idx]->deferred_list[wrk_idx][tail];
+    int tail;
+    esca_table_entry_t* dst;
+
+    // protected: accessed by multiple main-worker
+    spin_lock_irq(&ctx[ctx_idx]->df_lock);
+    tail = ctx[ctx_idx]->df_tail[wrk_idx];
+    ctx[ctx_idx]->df_tail[wrk_idx] = (ctx[ctx_idx]->df_tail[wrk_idx] + 1) & ctx[ctx_idx]->df_mask;
+    spin_unlock_irq(&ctx[ctx_idx]->df_lock);
+
+    dst = &ctx[ctx_idx]->deferred_list[wrk_idx][tail];
 
     dst->nargs = ent->nargs;
     dst->sysnum = ent->sysnum;
@@ -305,9 +313,22 @@ static void copy_table_entry_and_advance(int ctx_idx, int wrk_idx, int main_id, 
     /* store id of main_worker who dispatch this task */
     dst->pid = main_id;
 
-    ctx[ctx_idx]->df_tail[wrk_idx] = (ctx[ctx_idx]->df_tail[wrk_idx] + 1) & ctx[ctx_idx]->df_mask;
-
     smp_store_release(&dst->rstatus, BENTRY_BUSY);
+}
+
+static void move_deferred_entry(int ctx_idx, int wrk_idx, int src_idx, int dst_idx)
+{
+    esca_table_entry_t* src = &ctx[ctx_idx]->deferred_list[wrk_idx][src_idx];
+    esca_table_entry_t* dst = &ctx[ctx_idx]->deferred_list[wrk_idx][dst_idx];
+
+    dst->nargs = src->nargs;
+    dst->sysnum = src->sysnum;
+
+    for (int i = 0; i < 6; i++)
+        dst->args[i] = src->args[i];
+
+    dst->rstatus = BENTRY_BUSY;
+    src->rstatus = BENTRY_EMPTY;
 }
 
 // don't use this function, not safe
@@ -424,21 +445,9 @@ static int main_worker(void* arg)
             res = indirect_call(syscall_table_ptr[ent->sysnum], ent->nargs, ent->args);
 
             if (res == -EAGAIN) {
-                int nxt_wq;
-            main_worker_dispatch_again:
-                spin_lock_irq(&ctx[ctx_id]->wq_status_lock);
-                nxt_wq = ffs(ctx[ctx_id]->wq_status);
-
-                if (nxt_wq >= 32) {
-                    // Workqueue workers are exhausted
-                    spin_unlock_irq(&ctx[ctx_id]->wq_status_lock);
-                    goto main_worker_dispatch_again;
-                }
-
-                WRITE_ONCE(ctx[ctx_id]->wq_status, ctx[ctx_id]->wq_status & ~((unsigned int)1 << nxt_wq));
-                spin_unlock_irq(&ctx[ctx_id]->wq_status_lock);
-
-                // printk("main-%d dispatch sys[%d] to wq[%d]\n", wrk_id, ent->sysnum, nxt_wq);
+                // FIXME: refactor
+                // one wq-worker only; always dispatch to wq-worker-0
+                int nxt_wq = 0;
 
                 copy_table_entry_and_advance(ctx_id, nxt_wq, wrk_id, ent);
 
@@ -542,7 +551,7 @@ static int wq_worker(void* arg)
 {
     allow_signal(SIGKILL);
 
-    int ret = 0, head;
+    int ret = 0, head, tail;
     int main_id, master_id;
     unsigned int from_main = 0; // bitmap, if bit set, the task of that main_worker dispatching is completed
     int ctx_id = ((esca_wkr_args_t*)arg)->ctx_id;
@@ -560,7 +569,7 @@ static int wq_worker(void* arg)
     // set_cpus_allowed_ptr(current, cpumask_of(WQ_AFF_OFF));
 
     while (1) {
-    wq_worker_advance:
+        // don't protect: only one wq-worker access `df_head`
         head = ctx[ctx_id]->df_head[wrk_id];
         ent = &ctx[ctx_id]->deferred_list[wrk_id][head];
 
@@ -569,36 +578,6 @@ static int wq_worker(void* arg)
             if (signal_pending(current)) {
                 printk("detect signal from wq_worker\n");
                 goto wq_worker_exit;
-            }
-
-            /*
-                In current dispatching protocol, task won't be appended to the wq-worker which already has blocking task.
-                Thus, only check the completion while there is no deferred job.
-            */
-            if (work_node_reg[wrk_id]->cache_comp_num != 0) {
-                spin_lock_irq(&ctx[ctx_id]->comp_lock);
-                ctx[ctx_id]->comp_num += work_node_reg[wrk_id]->cache_comp_num;
-                spin_unlock_irq(&ctx[ctx_id]->comp_lock);
-
-                sq[master_id]->wq_has_finished |= ((unsigned int)1 << wrk_id);
-                smp_mb();
-
-                if (READ_ONCE(sq[master_id]->flags) & CTX_FLAGS_MAIN_WOULD_SLEEP) {
-                    // do we need to wake up main-worker?
-                    if (READ_ONCE(sq[master_id]->flags) & MAIN_WORKER_NEED_WAKEUP) {
-                        // printk("need to wake up the main_worker-%d from wq_worker-%d\n", master_id, wrk_id);
-                        wake_up(&main_worker_wait[master_id]);
-                    }
-                }
-
-                work_node_reg[wrk_id]->cache_comp_num = 0;
-                /*
-                    Make sure `comp_num` is updated, then allow the incoming tasks to be dispatched to this wq
-                */
-                smp_mb();
-                spin_lock_irq(&ctx[ctx_id]->wq_status_lock);
-                WRITE_ONCE(ctx[ctx_id]->wq_status, ctx[ctx_id]->wq_status | ((unsigned int)1 << wrk_id));
-                spin_unlock_irq(&ctx[ctx_id]->wq_status_lock);
             }
 
             // force to sleep in first-entrance
@@ -610,39 +589,85 @@ static int wq_worker(void* arg)
             goto wq_worker_sleep;
         }
 
-        do {
+        int cursor, new_head, remains = 0;
+        spin_lock_irq(&ctx[ctx_id]->df_lock);
+        tail = ctx[ctx_id]->df_tail[wrk_id];
+        spin_unlock_irq(&ctx[ctx_id]->df_lock);
+
+        cursor = head;
+
+        while (head != tail) {
+            ent = &ctx[ctx_id]->deferred_list[wrk_id][head];
             ret = indirect_call(syscall_table_ptr[ent->sysnum], ent->nargs, ent->args);
 
             if (ret != -EAGAIN) {
                 ent->sysret = ret;
-                break;
+                fill_cqe(ctx_id, ent);
+                work_node_reg[wrk_id]->cache_comp_num++;
+                ent->rstatus = BENTRY_EMPTY;
+#if 0
+                printk(KERN_INFO "In wq-%d, do syscall %d : %d = (%d, %d, %ld, %d) at cpu%d\n", wrk_id,
+                    ent->sysnum, ent->sysret, ent->args[0], ent->args[1], ent->args[2], ent->args[3], smp_processor_id());
+#endif
+            } else {
+                remains++;
+            }
+            head = (head + 1) & ctx[ctx_id]->df_mask;
+        }
+
+        new_head = cursor = (head + MAX_DEFERRED_NUM - 1) & DF_MASK;
+
+        while (remains > 0) {
+            ent = &ctx[ctx_id]->deferred_list[wrk_id][cursor];
+
+            // condense
+            if (ent->rstatus != BENTRY_EMPTY) {
+                if (cursor != new_head)
+                    move_deferred_entry(ctx_id, wrk_id, cursor, new_head);
+                remains--;
+                new_head = (new_head + MAX_DEFERRED_NUM - 1) & DF_MASK;
             }
 
-            cond_resched();
+            cursor = (cursor + MAX_DEFERRED_NUM - 1) & DF_MASK;
+        }
 
-            if (signal_pending(current))
-                goto wq_worker_exit;
-
-            // FIXME: update cache_comp_num?
-        } while (1);
-
-#if 0
-        printk(KERN_INFO "In wq-%d, do syscall %d : %d = (%d, %d, %ld, %d) at cpu%d\n", wrk_id,
-            ent->sysnum, ent->sysret, ent->args[0], ent->args[1], ent->args[2], ent->args[3], smp_processor_id());
-#endif
-        // updating CQ
-        fill_cqe(ctx_id, ent);
-        smp_mb();
-        ctx[ctx_id]->df_head[wrk_id] = (head + 1) & ctx[ctx_id]->df_mask;
-
-        // TODO: push result to completion queue
-        work_node_reg[wrk_id]->cache_comp_num++;
-        ent->rstatus = BENTRY_EMPTY;
-        smp_mb();
+        // update `df_head`
+        head = ctx[ctx_id]->df_head[wrk_id] = (new_head + 1) & DF_MASK;
+        ent = &ctx[ctx_id]->deferred_list[wrk_id][head];
 
         timeout = jiffies + ctx[ctx_id]->idle_time;
-        // continue;
-        goto wq_worker_advance;
+        smp_mb();
+
+        if (signal_pending(current))
+            goto wq_worker_exit;
+
+        if (work_node_reg[wrk_id]->cache_comp_num != 0) {
+            // FIXME: do we need a lock? only 1 wq-worker
+            spin_lock_irq(&ctx[ctx_id]->comp_lock);
+            ctx[ctx_id]->comp_num += work_node_reg[wrk_id]->cache_comp_num;
+            spin_unlock_irq(&ctx[ctx_id]->comp_lock);
+
+            sq[master_id]->wq_has_finished |= ((unsigned int)1 << wrk_id);
+            smp_mb();
+
+            if (READ_ONCE(sq[master_id]->flags) & CTX_FLAGS_MAIN_WOULD_SLEEP) {
+                // do we need to wake up main-worker?
+                if (READ_ONCE(sq[master_id]->flags) & MAIN_WORKER_NEED_WAKEUP) {
+                    // printk("need to wake up the main_worker-%d from wq_worker-%d\n", master_id, wrk_id);
+                    wake_up(&main_worker_wait[master_id]);
+                }
+            }
+
+            work_node_reg[wrk_id]->cache_comp_num = 0;
+            /*
+                Make sure `comp_num` is updated, then allow the incoming tasks to be dispatched to this wq
+            */
+            smp_mb();
+            spin_lock_irq(&ctx[ctx_id]->wq_status_lock);
+            WRITE_ONCE(ctx[ctx_id]->wq_status, ctx[ctx_id]->wq_status | ((unsigned int)1 << wrk_id));
+            spin_unlock_irq(&ctx[ctx_id]->wq_status_lock);
+        }
+        continue;
 
     wq_worker_sleep:
         prepare_to_wait(&wq_worker_wq[wrk_id], &wq_wait, TASK_INTERRUPTIBLE);
