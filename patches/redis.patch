@@ -28,7 +28,7 @@ diff '--color=auto' -Naur old/redis-1.3.12/Makefile new/redis-1.3.12/Makefile
  zmalloc.o: zmalloc.c config.h
  
  redis-server: $(OBJ)
--	$(CC) -o $(PRGNAME) $(CCOPT) $(DEBUG) $(OBJ) -lm
+-	$(CC) -o $(PRGNAME) $(CCOPT) $(DEBUG) $(OBJ)
 +	$(CC) ../wrapper/preload.c -o ../wrapper/preload.o -c
 +	$(CC) -o $(PRGNAME) $(CCOPT) $(DEBUG) $(OBJ) ../wrapper/preload.o -lm
  	@echo ""
