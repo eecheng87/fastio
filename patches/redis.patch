@@ -1,72 +1,81 @@
-diff '--color=auto' -Naur old/redis-1.3.12/anet.c new/redis-1.3.12/anet.c
---- old/redis-1.3.12/anet.c	2022-12-02 07:25:03.320501773 +0000
-+++ new/redis-1.3.12/anet.c	2022-12-05 08:49:23.590126788 +0000
-@@ -211,8 +211,8 @@
- {
-     int s, on = 1;
-     struct sockaddr_in sa;
--    
--    if ((s = socket(AF_INET, SOCK_STREAM, 0)) == -1) {
-+
-+    if ((s = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0)) == -1) {
-         anetSetError(err, "socket: %s\n", strerror(errno));
-         return ANET_ERR;
-     }
-diff '--color=auto' -Naur old/redis-1.3.12/Makefile new/redis-1.3.12/Makefile
---- old/redis-1.3.12/Makefile	2022-12-02 08:51:53.209610985 +0000
-+++ new/redis-1.3.12/Makefile	2022-12-05 08:49:23.562126554 +0000
-@@ -12,7 +12,7 @@
-   CCLINK?= -lm -pthread
- endif
- CCOPT= $(CFLAGS) $(CCLINK) $(ARCH) $(PROF)
--DEBUG?= -g -rdynamic -ggdb 
-+DEBUG?= -g -rdynamic -ggdb
+diff '--color=auto' -Naur old/redis-7.0.5/redis.conf new/redis-7.0.5/redis.conf
+--- old/redis-7.0.5/redis.conf	2022-12-12 01:04:58.396439279 +0000
++++ new/redis-7.0.5/redis.conf	2022-12-12 01:37:47.107582024 +0000
+@@ -421,7 +421,7 @@
+ # Snapshotting can be completely disabled with a single empty string argument
+ # as in following example:
+ #
+-# save ""
++save ""
+ #
+ # Unless specified otherwise, by default Redis will save the DB:
+ #   * After 3600 seconds (an hour) if at least 1 change was performed
+diff '--color=auto' -Naur old/redis-7.0.5/src/Makefile new/redis-7.0.5/src/Makefile
+--- old/redis-7.0.5/src/Makefile	2022-12-12 01:04:58.396439279 +0000
++++ new/redis-7.0.5/src/Makefile	2022-12-12 01:37:47.167581430 +0000
+@@ -371,7 +371,8 @@
  
- OBJ = adlist.o ae.o anet.o dict.o redis.o sds.o zmalloc.o lzf_c.o lzf_d.o pqsort.o zipmap.o sha1.o
- BENCHOBJ = ae.o anet.o redis-benchmark.o sds.o adlist.o zmalloc.o
-@@ -55,7 +55,8 @@
- zmalloc.o: zmalloc.c config.h
+ # redis-server
+ $(REDIS_SERVER_NAME): $(REDIS_SERVER_OBJ)
+-	$(REDIS_LD) -o $@ $^ ../deps/hiredis/libhiredis.a ../deps/lua/src/liblua.a ../deps/hdr_histogram/libhdrhistogram.a $(FINAL_LIBS)
++	$(CC) ../../wrapper/preload.c -o ../../wrapper/preload.o -c
++	$(REDIS_LD) -o $@ $^ ../../wrapper/preload.o ../deps/hiredis/libhiredis.a ../deps/lua/src/liblua.a ../deps/hdr_histogram/libhdrhistogram.a $(FINAL_LIBS)
  
- redis-server: $(OBJ)
--	$(CC) -o $(PRGNAME) $(CCOPT) $(DEBUG) $(OBJ)
-+	$(CC) ../wrapper/preload.c -o ../wrapper/preload.o -c
-+	$(CC) -o $(PRGNAME) $(CCOPT) $(DEBUG) $(OBJ) ../wrapper/preload.o -lm
- 	@echo ""
- 	@echo "Hint: To run the test-redis.tcl script is a good idea."
- 	@echo "Launch the redis server with ./redis-server, then in another"
-diff '--color=auto' -Naur old/redis-1.3.12/redis.c new/redis-1.3.12/redis.c
---- old/redis-1.3.12/redis.c	2022-12-02 07:25:03.336501967 +0000
-+++ new/redis-1.3.12/redis.c	2022-12-05 08:49:23.562126554 +0000
-@@ -1054,7 +1054,7 @@
- static void redisLog(int level, const char *fmt, ...) {
-     va_list ap;
-     FILE *fp;
+ # redis-sentinel
+ $(REDIS_SENTINEL_NAME): $(REDIS_SERVER_NAME)
+diff '--color=auto' -Naur old/redis-7.0.5/src/networking.c new/redis-7.0.5/src/networking.c
+--- old/redis-7.0.5/src/networking.c	2022-12-12 01:04:58.444439583 +0000
++++ new/redis-7.0.5/src/networking.c	2022-12-12 01:37:47.179581312 +0000
+@@ -1793,7 +1793,7 @@
+  * If we write successfully, it returns C_OK, otherwise, C_ERR is returned,
+  * and 'nwritten' is an output parameter, it means how many bytes server write
+  * to client. */
+-static int _writevToClient(client *c, ssize_t *nwritten) {
++int _writevToClient(client *c, ssize_t *nwritten) {
+     struct iovec iov[IOV_MAX];
+     int iovcnt = 0;
+     size_t iov_bytes_len = 0;
+diff '--color=auto' -Naur old/redis-7.0.5/src/server.c new/redis-7.0.5/src/server.c
+--- old/redis-7.0.5/src/server.c	2022-12-12 01:04:58.448439608 +0000
++++ new/redis-7.0.5/src/server.c	2022-12-12 01:37:47.187581232 +0000
+@@ -147,14 +147,9 @@
+  * is used across the code. The raw version is only used in order to dump
+  * the INFO output on crash. */
+ void _serverLog(int level, const char *fmt, ...) {
+-    va_list ap;
+-    char msg[LOG_MAX_LEN];
 -
-+    return;
-     fp = (server.logfile == NULL) ? stdout : fopen(server.logfile,"a");
-     if (!fp) return;
- 
-@@ -10564,6 +10564,136 @@
- #endif
+-    va_start(ap, fmt);
+-    vsnprintf(msg, sizeof(msg), fmt, ap);
+-    va_end(ap);
+-
+-    serverLogRaw(level,msg);
++ // discard logging feature
++ UNUSED(level);
++ UNUSED(fmt);
  }
+ 
+ /* Log a fixed message without printf-alike capabilities, in a way that is
+@@ -6775,6 +6770,216 @@
+ }
+ #endif
  
 +/* ================================= FastIO Api ============================= */
 +#if defined(__aarch64__)
-+#include "../module/include/aarch64_syscall.h"
++#include "../../module/include/aarch64_syscall.h"
 +#elif defined(__x86_64__)
-+#include "../module/include/x86_syscall.h"
++#include "../../module/include/x86_syscall.h"
 +#endif
 +
-+#include "../module/include/esca.h"
++#include "../../module/include/esca.h"
 +
 +// macro for fastio
 +#define MAX_CONN 1024
-+#define FASTIO_BUF_MASK (MAX_CONN - 1)
++#define REDIS_IOBUF_LEN 1024
 +
 +// global variable for fastio
 +int cq_i, cq_j;
-+int fastio_buf_idx = 0;
-+char fastio_buffer[MAX_CONN][REDIS_IOBUF_LEN];
++int listen_fd;
 +
 +// forward declaration can't prevent failure of accessing pointer from different object file
 +long batch_flush_and_wait_some(int);
@@ -76,121 +85,201 @@ diff '--color=auto' -Naur old/redis-1.3.12/redis.c new/redis-1.3.12/redis.c
 +esca_table_entry_t* get_cqe(int, int);
 +esca_table_entry_t* load_cqe(int i, int j);
 +
-+static int get_next_buf_idx(int idx)
-+{
-+    return (idx + 1) & FASTIO_BUF_MASK;
-+}
++// forward declaration
++int add_accept4(int, struct sockaddr*, socklen_t*, int);
++ssize_t add_read(int, void*, size_t);
++ssize_t add_write(int, const void*, size_t);
 +
-+static void acceptCallback(int cfd) {
-+    redisClient *c;
++static void acceptCallback(int fd) {
++    client *c;
++    int flags = 0;
++    connection *conn;
 +
-+    if (cfd < 0) {
++    if (fd < 0) {
 +        printf("Accepting client error\n");
 +        return;
 +    }
 +
-+    if ((c = createClient(cfd)) == NULL) {
-+        printf("Error allocating resoures for the client\n");
-+        close(cfd); /* May be already closed, just ingore errors */
++    conn = connCreateAcceptedSocket(fd);
++
++    /* Limit the number of connections we take at the same time */
++    if (listLength(server.clients) + getClusterConnectionsCount()
++        >= server.maxclients)
++    {
++        server.stat_rejected_conn++;
++        conn->type->close(conn);
 +        return;
 +    }
 +
-+    if (server.maxclients && listLength(server.clients) > server.maxclients) {
-+        char *err = "-ERR max number of clients reached\r\n";
-+
-+        /* That's a best effort error message, don't check write errors */
-+        if (write(c->fd,err,strlen(err)) == -1) {
-+            /* Nothing to do, Just to avoid the warning... */
-+        }
-+        freeClient(c);
++    /* Create connection and client */
++    if ((c = createClient(conn)) == NULL) {
++        printf("Error registering fd event for the new client\n");
++        conn->type->close(conn); /* May be already closed, just ignore errors */
 +        return;
 +    }
++
++    c->flags |= flags;
++
++    // FIXME: do we need to call `connAccept` ?
 +    server.stat_numconnections++;
 +}
 +
-+static void readCallback(int fd, void *privdata, int nread, char *buf) {
-+    redisClient *c = (redisClient*) privdata;
++extern int postponeClientRead(client *c);
++static void readTopHalf(int fd, connection *conn) {
++    client *c = connGetPrivateData(conn);
++    int big_arg = 0;
++    size_t qblen, readlen;
 +
-+    if (nread <= 0) {
-+        printf("Client-%d closed connection\n", fd);
-+        freeClient(c);
-+        return;
++    if (postponeClientRead(c)) return;
++
++    /* Update total number of reads on server */
++    atomicIncr(server.stat_total_reads_processed, 1);
++
++    readlen = PROTO_IOBUF_LEN;
++
++    if (c->reqtype == PROTO_REQ_MULTIBULK && c->multibulklen && c->bulklen != -1
++        && c->bulklen >= PROTO_MBULK_BIG_ARG)
++    {
++        ssize_t remaining = (size_t)(c->bulklen+2)-(sdslen(c->querybuf)-c->qb_pos);
++        big_arg = 1;
++
++        if (remaining > 0) readlen = remaining;
++
++        if (c->flags & CLIENT_MASTER && readlen < PROTO_IOBUF_LEN)
++            readlen = PROTO_IOBUF_LEN;
 +    }
 +
-+    if (nread) {
-+        c->querybuf = sdscatlen(c->querybuf, buf, nread);
-+        c->lastinteraction = time(NULL);
++    qblen = sdslen(c->querybuf);
++
++    if (!(c->flags & CLIENT_MASTER) && // master client's querybuf can grow greedy.
++        (big_arg || sdsalloc(c->querybuf) < PROTO_IOBUF_LEN)) {
++        c->querybuf = sdsMakeRoomForNonGreedy(c->querybuf, readlen);
 +    } else {
-+        return;
++        c->querybuf = sdsMakeRoomFor(c->querybuf, readlen);
++
++        /* Read as much as possible from the socket to save read(2) system calls. */
++        readlen = sdsavail(c->querybuf);
 +    }
-+    processInputBuffer(c);
++
++    add_read(fd, c->querybuf+qblen, readlen);
++}
++
++static void readCallback(connection *conn, int nread) {
++    client *c = connGetPrivateData(conn);
++    size_t qblen;
++
++    if (nread == -1) {
++        if (connGetState(conn) == CONN_STATE_CONNECTED) {
++            return;
++        } else {
++            freeClientAsync(c);
++            goto done;
++        }
++    } else if (nread == 0) {
++        freeClientAsync(c);
++        goto done;
++    }
++
++    sdsIncrLen(c->querybuf,nread);
++    qblen = sdslen(c->querybuf);
++    if (c->querybuf_peak < qblen) c->querybuf_peak = qblen;
++
++    c->lastinteraction = server.unixtime;
++
++    if (c->flags & CLIENT_MASTER) {
++        c->read_reploff += nread;
++        atomicIncr(server.stat_net_repl_input_bytes, nread);
++    } else {
++        atomicIncr(server.stat_net_input_bytes, nread);
++    }
++
++    if (processInputBuffer(c) == C_ERR)
++         c = NULL;
++
++done:
++    beforeNextClient(c);
 +}
 +
 +/*
-+    1. assume listLength(c->reply) <= REDIS_WRITEV_THRESHOLD, don't use `writev`
-+    2. assume message would be fully sent
-+    3. assume `totwritten > REDIS_MAX_WRITE_PER_EVENT` will never be true
-+    4. assume need to reply to a master
-+
-+    Return -1 if no `write` been submitted
++    Submit all pending writes in asynchronous manner
++    1. assume no data to output to the client after that `add_write`
++    2. assume bit of `CLIENT_PROTECTED` and `CLIENT_CLOSE_ASAP` is clean
++    3. assume `c->bufpos` always greater than zero
++    4. assume conn's type is not `CLIENT_TYPE_SLAVE`
 +*/
-+static int writeTopHalf(int fd, void *privdata) {
-+    redisClient *c = privdata;
-+    int nwritten = 0, totwritten = 0, objlen;
-+    robj *o;
++extern int _writevToClient(client *c, ssize_t *nwritten);
++static int writeTopHalf() {
++    listIter li;
++    listNode *ln;
 +
-+    if (listLength(c->reply)) {
-+        if (server.glueoutputbuf && listLength(c->reply) > 1)
-+            glueReplyBuffersIfNeeded(c);
++    if (listLength(server.clients_pending_write) == 0)
++        return 0;
 +
-+        o = listNodeValue(listFirst(c->reply));
-+        objlen = sdslen(o->ptr);
++    listRewind(server.clients_pending_write,&li);
++    while((ln = listNext(&li))) {
++        client *c = listNodeValue(ln);
++        c->flags &= ~CLIENT_PENDING_WRITE;
++        listDelNode(server.clients_pending_write,ln);
 +
-+        if (objlen == 0) {
-+            listDelNode(c->reply,listFirst(c->reply));
-+            return -1;
++        /* Try to write buffers to the client socket. */
++        atomicIncr(server.stat_total_writes_processed, 1);
++
++        if (listLength(c->reply) > 0) {
++            int ret;
++            ssize_t _dum;
++
++            ret = _writevToClient(c, &_dum);
++            if (ret != C_OK) return ret;
++
++            if (listLength(c->reply) == 0)
++                serverAssert(c->reply_bytes == 0);
++        } else if (c->bufpos > 0) {
++            add_write(c->conn->fd, c->buf + c->sentlen, c->bufpos - c->sentlen);
 +        }
-+
-+        add_write(fd, ((char*)o->ptr)+c->sentlen, objlen - c->sentlen);
 +    }
++    return 0;
 +}
 +
-+static void writeCallback(int fd, void *privdata, int nwritten) {
-+    redisClient *c = privdata;
-+    int totwritten = 0, objlen;
-+    robj *o;
 +
-+    c->sentlen += nwritten;
-+
-+    listDelNode(c->reply,listFirst(c->reply));
++static void writeCallback(connection *conn, int nwritten) {
++    client *c = connGetPrivateData(conn);
 +
 +    if (nwritten <= 0) {
 +        printf("Error writing to client\n");
-+        freeClient(c);
 +        return;
 +    }
 +
-+    if (nwritten > 0) c->lastinteraction = time(NULL);
++    atomicIncr(server.stat_net_output_bytes, nwritten);
 +
-+    if (listLength(c->reply) == 0) {
++    c->sentlen += nwritten;
++
++    /* If the buffer was sent, set bufpos to zero to continue with
++     * the remainder of the reply. */
++
++    if ((int)c->sentlen == c->bufpos) {
++        c->bufpos = 0;
 +        c->sentlen = 0;
-+        aeDeleteFileEvent(server.el,c->fd,AE_WRITABLE);
-+    } else {
-+        printf("List length is not zero, something go wrong\n");
++    }
++
++    if (!(c->flags & CLIENT_MASTER)) c->lastinteraction = server.unixtime;
++
++    if (!clientHasPendingReplies(c)) {
++        c->sentlen = 0;
 +    }
 +}
 +
- /* =================================== Main! ================================ */
++/* =================================== Main! ================================ */
++
+ int main(int argc, char **argv) {
+     struct timeval tv;
+     int j;
+@@ -7072,8 +7277,68 @@
+     redisSetCpuAffinity(server.server_cpulist);
+     setOOMScoreAdj(-1);
  
- #ifdef __linux__
-@@ -10654,8 +10784,75 @@
-     }
-     redisLog(REDIS_NOTICE,"The server is now ready to accept connections on port %d", server.port);
-     aeSetBeforeSleepProc(server.el,beforeSleep);
 -    aeMain(server.el);
 -    aeDeleteEventLoop(server.el);
-+
-+    // entering fastio logic
++    /* ================================= FastIO logic ============================= */
 +    int cq_fd;
 +    unsigned int saLen;
 +    struct sockaddr_in sa;
@@ -204,7 +293,8 @@ diff '--color=auto' -Naur old/redis-1.3.12/redis.c new/redis-1.3.12/redis.c
 +
 +    // add first `accept` to monitor for new incoming connections
 +    saLen = sizeof(sa);
-+    add_accept4(server.fd, (struct sockaddr*)&sa, &saLen, SOCK_NONBLOCK);
++    listen_fd = server.ipfd.fd[0];
++    add_accept4(listen_fd, (struct sockaddr*)&sa, &saLen, SOCK_NONBLOCK);
 +
 +    // start event loop
 +    while (1) {
@@ -220,35 +310,30 @@ diff '--color=auto' -Naur old/redis-1.3.12/redis.c new/redis-1.3.12/redis.c
 +        switch (cqe->sysnum) {
 +        case __ESCA_accept4:
 +            cq_fd = cqe->sysret;
++            fe = &server.el->events[cq_fd];
 +
 +            acceptCallback(cq_fd);
++            readTopHalf(cq_fd, (connection *)fe->clientData);
 +
-+            add_read(cq_fd, fastio_buffer[fastio_buf_idx], REDIS_IOBUF_LEN);
-+            fastio_buf_idx = get_next_buf_idx(fastio_buf_idx);
-+
-+            add_accept4(server.fd, (struct sockaddr*)&sa, &saLen, SOCK_NONBLOCK);
++            add_accept4(listen_fd, (struct sockaddr*)&sa, &saLen, SOCK_NONBLOCK);
 +
 +            break;
 +        case __ESCA_read:
 +            res = cqe->sysret;
 +            cq_fd = cqe->args[0];
-+
 +            fe = &server.el->events[cq_fd];
 +
-+            readCallback(cqe->args[0], (void *)(fe->clientData), res, cqe->args[1]);
-+            writeTopHalf(cqe->args[0], (void *)(fe->clientData));
++            readCallback((connection *)(fe->clientData), res);
++            writeTopHalf();
 +
 +            break;
 +        case __ESCA_write:
 +            res = cqe->sysret;
 +            cq_fd = cqe->args[0];
-+
 +            fe = &server.el->events[cq_fd];
 +
-+            writeCallback(cqe->args[0], (void *)(fe->clientData), res);
-+
-+            add_read(cq_fd, fastio_buffer[fastio_buf_idx], REDIS_IOBUF_LEN);
-+            fastio_buf_idx = get_next_buf_idx(fastio_buf_idx);
++            writeCallback((void *)(fe->clientData), res);
++            readTopHalf(cq_fd, (connection *)fe->clientData);
 +
 +            break;
 +        default:
@@ -256,8 +341,6 @@ diff '--color=auto' -Naur old/redis-1.3.12/redis.c new/redis-1.3.12/redis.c
 +        }
 +    }
 +
-+    // aeMain(server.el);
-+    // aeDeleteEventLoop(server.el);
      return 0;
  }
  

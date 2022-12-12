@@ -4,9 +4,9 @@ TOPTARGETS := all clean
 PWD := $(shell pwd)
 OUT := downloads
 
-REDIS_SOURCE := https://github.com/redis/redis/archive/refs/tags/v1.3.12.zip
-REDIS_NAME := redis-1.3.12
-REDIS_ZIP_NAME := v1.3.12
+REDIS_SOURCE := https://github.com/redis/redis/archive/refs/tags/7.0.5.zip
+REDIS_NAME := redis-7.0.5
+REDIS_ZIP_NAME := 7.0.5
 REDIS_PATH := $(REDIS_NAME)
 REDIS := redis
 
@@ -34,7 +34,7 @@ redis:
 	unzip $(REDIS_ZIP_NAME).zip
 	rm $(REDIS_ZIP_NAME).zip
 	cd $(REDIS_PATH) && patch -p2 -i ../patches/redis.patch
-	cd $(REDIS_PATH) && make -j$(nproc)
+	cd $(REDIS_PATH) && make redis-server -j$(nproc)
 
 clean-out:
 	rm -rf $(OUT)
