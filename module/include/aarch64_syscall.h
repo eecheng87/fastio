@@ -6,3 +6,4 @@
 #define __ESCA_sendmsg 211
 #define __ESCA_accept4 242
 #define __ESCA_read 63
+#define __ESCA_writev 66

@@ -1,6 +1,6 @@
 diff '--color=auto' -Naur old/redis-7.0.5/redis.conf new/redis-7.0.5/redis.conf
 --- old/redis-7.0.5/redis.conf	2022-12-12 01:04:58.396439279 +0000
-+++ new/redis-7.0.5/redis.conf	2022-12-12 01:37:47.107582024 +0000
++++ new/redis-7.0.5/redis.conf	2022-12-14 13:46:30.683737011 +0000
 @@ -421,7 +421,7 @@
  # Snapshotting can be completely disabled with a single empty string argument
  # as in following example:
@@ -12,7 +12,7 @@ diff '--color=auto' -Naur old/redis-7.0.5/redis.conf new/redis-7.0.5/redis.conf
  #   * After 3600 seconds (an hour) if at least 1 change was performed
 diff '--color=auto' -Naur old/redis-7.0.5/src/Makefile new/redis-7.0.5/src/Makefile
 --- old/redis-7.0.5/src/Makefile	2022-12-12 01:04:58.396439279 +0000
-+++ new/redis-7.0.5/src/Makefile	2022-12-12 01:37:47.167581430 +0000
++++ new/redis-7.0.5/src/Makefile	2022-12-14 13:46:30.743737262 +0000
 @@ -371,7 +371,8 @@
  
  # redis-server
@@ -25,7 +25,7 @@ diff '--color=auto' -Naur old/redis-7.0.5/src/Makefile new/redis-7.0.5/src/Makef
  $(REDIS_SENTINEL_NAME): $(REDIS_SERVER_NAME)
 diff '--color=auto' -Naur old/redis-7.0.5/src/networking.c new/redis-7.0.5/src/networking.c
 --- old/redis-7.0.5/src/networking.c	2022-12-12 01:04:58.444439583 +0000
-+++ new/redis-7.0.5/src/networking.c	2022-12-12 01:37:47.179581312 +0000
++++ new/redis-7.0.5/src/networking.c	2022-12-14 13:46:30.743737262 +0000
 @@ -1793,7 +1793,7 @@
   * If we write successfully, it returns C_OK, otherwise, C_ERR is returned,
   * and 'nwritten' is an output parameter, it means how many bytes server write
@@ -35,9 +35,38 @@ diff '--color=auto' -Naur old/redis-7.0.5/src/networking.c new/redis-7.0.5/src/n
      struct iovec iov[IOV_MAX];
      int iovcnt = 0;
      size_t iov_bytes_len = 0;
+@@ -2492,6 +2492,7 @@
+  * pending query buffer, already representing a full command, to process.
+  * return C_ERR in case the client was freed during the processing */
+ int processInputBuffer(client *c) {
++    int ret = C_OK;
+     /* Keep processing while there is something in the input buffer */
+     while(c->qb_pos < sdslen(c->querybuf)) {
+         /* Immediately abort if the client is in the middle of something. */
+@@ -2526,7 +2527,10 @@
+         if (c->reqtype == PROTO_REQ_INLINE) {
+             if (processInlineBuffer(c) != C_OK) break;
+         } else if (c->reqtype == PROTO_REQ_MULTIBULK) {
+-            if (processMultibulkBuffer(c) != C_OK) break;
++            if (processMultibulkBuffer(c) != C_OK) {
++                ret = C_AGAIN;
++                break;
++            }
+         } else {
+             serverPanic("Unknown request type");
+         }
+@@ -2584,7 +2588,7 @@
+     if (io_threads_op == IO_THREADS_OP_IDLE)
+         updateClientMemUsage(c);
+ 
+-    return C_OK;
++    return ret;
+ }
+ 
+ void readQueryFromClient(connection *conn) {
 diff '--color=auto' -Naur old/redis-7.0.5/src/server.c new/redis-7.0.5/src/server.c
 --- old/redis-7.0.5/src/server.c	2022-12-12 01:04:58.448439608 +0000
-+++ new/redis-7.0.5/src/server.c	2022-12-12 01:37:47.187581232 +0000
++++ new/redis-7.0.5/src/server.c	2022-12-14 13:46:30.787737447 +0000
 @@ -147,14 +147,9 @@
   * is used across the code. The raw version is only used in order to dump
   * the INFO output on crash. */
@@ -56,7 +85,7 @@ diff '--color=auto' -Naur old/redis-7.0.5/src/server.c new/redis-7.0.5/src/serve
  }
  
  /* Log a fixed message without printf-alike capabilities, in a way that is
-@@ -6775,6 +6770,216 @@
+@@ -6775,6 +6770,296 @@
  }
  #endif
  
@@ -86,9 +115,11 @@ diff '--color=auto' -Naur old/redis-7.0.5/src/server.c new/redis-7.0.5/src/serve
 +esca_table_entry_t* load_cqe(int i, int j);
 +
 +// forward declaration
++static int writeTopHalf();
 +int add_accept4(int, struct sockaddr*, socklen_t*, int);
 +ssize_t add_read(int, void*, size_t);
 +ssize_t add_write(int, const void*, size_t);
++ssize_t add_writev(int fd, const struct iovec *iov, int iovcnt);
 +
 +static void acceptCallback(int fd) {
 +    client *c;
@@ -125,7 +156,7 @@ diff '--color=auto' -Naur old/redis-7.0.5/src/server.c new/redis-7.0.5/src/serve
 +}
 +
 +extern int postponeClientRead(client *c);
-+static void readTopHalf(int fd, connection *conn) {
++static void readTopHalf(connection *conn) {
 +    client *c = connGetPrivateData(conn);
 +    int big_arg = 0;
 +    size_t qblen, readlen;
@@ -161,12 +192,13 @@ diff '--color=auto' -Naur old/redis-7.0.5/src/server.c new/redis-7.0.5/src/serve
 +        readlen = sdsavail(c->querybuf);
 +    }
 +
-+    add_read(fd, c->querybuf+qblen, readlen);
++    add_read(conn->fd, c->querybuf+qblen, readlen);
 +}
 +
 +static void readCallback(connection *conn, int nread) {
 +    client *c = connGetPrivateData(conn);
 +    size_t qblen;
++    int ret = C_OK;
 +
 +    if (nread == -1) {
 +        if (connGetState(conn) == CONN_STATE_CONNECTED) {
@@ -193,11 +225,18 @@ diff '--color=auto' -Naur old/redis-7.0.5/src/server.c new/redis-7.0.5/src/serve
 +        atomicIncr(server.stat_net_input_bytes, nread);
 +    }
 +
-+    if (processInputBuffer(c) == C_ERR)
-+         c = NULL;
++    ret = processInputBuffer(c);
++
++    if (ret == C_ERR)
++        c = NULL;
 +
 +done:
 +    beforeNextClient(c);
++
++    if (ret == C_AGAIN)
++        readTopHalf(conn);
++    else if (ret == C_OK)
++        writeTopHalf();
 +}
 +
 +/*
@@ -206,8 +245,45 @@ diff '--color=auto' -Naur old/redis-7.0.5/src/server.c new/redis-7.0.5/src/serve
 +    2. assume bit of `CLIENT_PROTECTED` and `CLIENT_CLOSE_ASAP` is clean
 +    3. assume `c->bufpos` always greater than zero
 +    4. assume conn's type is not `CLIENT_TYPE_SLAVE`
++    5. assume clientHasPendingReplies(c) will never be true after sending first `_writeToClient`
 +*/
 +extern int _writevToClient(client *c, ssize_t *nwritten);
++
++static void writevTopHalf(client *c) {
++    struct iovec iov[IOV_MAX];
++    int iovcnt = 0;
++    size_t iov_bytes_len = 0;
++    
++    if (c->bufpos > 0) {
++        iov[iovcnt].iov_base = c->buf + c->sentlen;
++        iov[iovcnt].iov_len = c->bufpos - c->sentlen;
++        iov_bytes_len += iov[iovcnt++].iov_len;
++    }
++    
++    size_t offset = c->bufpos > 0 ? 0 : c->sentlen;
++    listIter iter;
++    listNode *next;
++    clientReplyBlock *o;
++    listRewind(c->reply, &iter);
++    while ((next = listNext(&iter)) && iovcnt < IOV_MAX && iov_bytes_len < NET_MAX_WRITES_PER_EVENT) {
++        o = listNodeValue(next);
++        if (o->used == 0) { /* empty node, just release it and skip. */
++            c->reply_bytes -= o->size;
++            listDelNode(c->reply, next);
++            offset = 0;
++            continue;
++        }
++
++        iov[iovcnt].iov_base = o->buf + offset;
++        iov[iovcnt].iov_len = o->used - offset;
++        iov_bytes_len += iov[iovcnt++].iov_len;
++        offset = 0;
++    }
++    if (iovcnt == 0) return;
++
++    add_writev(c->conn->fd, iov, iovcnt);
++}
++
 +static int writeTopHalf() {
 +    listIter li;
 +    listNode *ln;
@@ -215,6 +291,7 @@ diff '--color=auto' -Naur old/redis-7.0.5/src/server.c new/redis-7.0.5/src/serve
 +    if (listLength(server.clients_pending_write) == 0)
 +        return 0;
 +
++    /* in `handleClientsWithPendingWrites` */
 +    listRewind(server.clients_pending_write,&li);
 +    while((ln = listNext(&li))) {
 +        client *c = listNodeValue(ln);
@@ -224,15 +301,9 @@ diff '--color=auto' -Naur old/redis-7.0.5/src/server.c new/redis-7.0.5/src/serve
 +        /* Try to write buffers to the client socket. */
 +        atomicIncr(server.stat_total_writes_processed, 1);
 +
++        /* in `_writeToClient`; don't trigger second twice, check out assumption 5 */
 +        if (listLength(c->reply) > 0) {
-+            int ret;
-+            ssize_t _dum;
-+
-+            ret = _writevToClient(c, &_dum);
-+            if (ret != C_OK) return ret;
-+
-+            if (listLength(c->reply) == 0)
-+                serverAssert(c->reply_bytes == 0);
++            writevTopHalf(c);
 +        } else if (c->bufpos > 0) {
 +            add_write(c->conn->fd, c->buf + c->sentlen, c->bufpos - c->sentlen);
 +        }
@@ -268,12 +339,50 @@ diff '--color=auto' -Naur old/redis-7.0.5/src/server.c new/redis-7.0.5/src/serve
 +    }
 +}
 +
++static void writevCallback(connection *conn, int nwritten) {
++    listIter iter;
++    listNode *next;
++    clientReplyBlock *o;
++
++    client *c = connGetPrivateData(conn);
++
++    if (nwritten <= 0) {
++        printf("Error writev to client\n");
++        return;
++    }
++
++    ssize_t remaining = nwritten;
++    if (c->bufpos > 0) { /* deal with static reply buffer first. */
++        int buf_len = c->bufpos - c->sentlen;
++        c->sentlen += remaining;
++
++        if (remaining >= buf_len) {
++            c->bufpos = 0;
++            c->sentlen = 0;
++        }
++        remaining -= buf_len;
++    }
++    listRewind(c->reply, &iter);
++    while (remaining > 0) {
++        next = listNext(&iter);
++        o = listNodeValue(next);
++        if (remaining < (ssize_t)(o->used - c->sentlen)) {
++            c->sentlen += remaining;
++            break;
++        }
++        remaining -= (ssize_t)(o->used - c->sentlen);
++        c->reply_bytes -= o->size;
++        listDelNode(c->reply, next);
++        c->sentlen = 0;
++    }
++}
++
 +/* =================================== Main! ================================ */
 +
  int main(int argc, char **argv) {
      struct timeval tv;
      int j;
-@@ -7072,8 +7277,68 @@
+@@ -7072,8 +7357,76 @@
      redisSetCpuAffinity(server.server_cpulist);
      setOOMScoreAdj(-1);
  
@@ -313,7 +422,7 @@ diff '--color=auto' -Naur old/redis-7.0.5/src/server.c new/redis-7.0.5/src/serve
 +            fe = &server.el->events[cq_fd];
 +
 +            acceptCallback(cq_fd);
-+            readTopHalf(cq_fd, (connection *)fe->clientData);
++            readTopHalf((connection *)fe->clientData);
 +
 +            add_accept4(listen_fd, (struct sockaddr*)&sa, &saLen, SOCK_NONBLOCK);
 +
@@ -324,7 +433,6 @@ diff '--color=auto' -Naur old/redis-7.0.5/src/server.c new/redis-7.0.5/src/serve
 +            fe = &server.el->events[cq_fd];
 +
 +            readCallback((connection *)(fe->clientData), res);
-+            writeTopHalf();
 +
 +            break;
 +        case __ESCA_write:
@@ -333,7 +441,16 @@ diff '--color=auto' -Naur old/redis-7.0.5/src/server.c new/redis-7.0.5/src/serve
 +            fe = &server.el->events[cq_fd];
 +
 +            writeCallback((void *)(fe->clientData), res);
-+            readTopHalf(cq_fd, (connection *)fe->clientData);
++            readTopHalf((connection *)fe->clientData);
++
++            break;
++        case __ESCA_writev:
++            res = cqe->sysret;
++            cq_fd = cqe->args[0];
++            fe = &server.el->events[cq_fd];
++
++            writevCallback((void *)(fe->clientData), res);
++            readTopHalf((connection *)fe->clientData);
 +
 +            break;
 +        default:
@@ -344,3 +461,14 @@ diff '--color=auto' -Naur old/redis-7.0.5/src/server.c new/redis-7.0.5/src/serve
      return 0;
  }
  
+diff '--color=auto' -Naur old/redis-7.0.5/src/server.h new/redis-7.0.5/src/server.h
+--- old/redis-7.0.5/src/server.h	2022-12-12 01:04:58.452439633 +0000
++++ new/redis-7.0.5/src/server.h	2022-12-14 13:46:30.795737481 +0000
+@@ -99,6 +99,7 @@
+ /* Error codes */
+ #define C_OK                    0
+ #define C_ERR                   -1
++#define C_AGAIN                 -2
+ 
+ /* Static server configuration */
+ #define CONFIG_DEFAULT_HZ        10             /* Time interrupt calls/sec. */

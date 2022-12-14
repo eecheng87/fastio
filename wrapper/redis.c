@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include <sys/socket.h>
+#include <sys/uio.h>
 
 int add_accept4(int sockfd, struct sockaddr* addr, socklen_t* addrlen, int flags)
 {
@@ -65,6 +66,30 @@ ssize_t add_write(int fd, const void* buf, size_t count)
     sq[idx]->user_tables[i][j].args[0] = fd;
     sq[idx]->user_tables[i][j].args[1] = buf;
     sq[idx]->user_tables[i][j].args[2] = count;
+
+    update_tail(sq[idx]);
+
+    esca_smp_store_release(&sq[idx]->user_tables[i][j].rstatus, BENTRY_BUSY);
+
+    /* assume success */
+    return 0;
+}
+
+ssize_t add_writev(int fd, const struct iovec *iov, int iovcnt)
+{
+    int idx = this_worker_id * RATIO + (fd % RATIO);
+    peek_main_worker();
+
+    batch_num++;
+
+    int i = sq[idx]->tail_table;
+    int j = sq[idx]->tail_entry;
+
+    sq[idx]->user_tables[i][j].sysnum = __ESCA_writev;
+    sq[idx]->user_tables[i][j].nargs = 3;
+    sq[idx]->user_tables[i][j].args[0] = fd;
+    sq[idx]->user_tables[i][j].args[1] = iov;
+    sq[idx]->user_tables[i][j].args[2] = iovcnt;
 
     update_tail(sq[idx]);
 
