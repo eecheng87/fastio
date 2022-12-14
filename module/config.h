@@ -27,7 +27,7 @@ typedef struct esca_config {
     int wq_affinity_offset;
 } esca_config_t;
 
-static const esca_config_t default_config
+static esca_config_t default_config
     = {
           .esca_localize = 1,
           .max_table_entry = 64,
