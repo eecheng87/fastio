@@ -18,7 +18,7 @@ diff '--color=auto' -Naur old/redis-7.0.5/src/Makefile new/redis-7.0.5/src/Makef
  # redis-server
  $(REDIS_SERVER_NAME): $(REDIS_SERVER_OBJ)
 -	$(REDIS_LD) -o $@ $^ ../deps/hiredis/libhiredis.a ../deps/lua/src/liblua.a ../deps/hdr_histogram/libhdrhistogram.a $(FINAL_LIBS)
-+	$(CC) ../../wrapper/preload.c -o ../../wrapper/preload.o -c
++	$(CC) ../../wrapper/preload.c -o ../../wrapper/preload.o -c -Wno-int-conversion
 +	$(REDIS_LD) -o $@ $^ ../../wrapper/preload.o ../deps/hiredis/libhiredis.a ../deps/lua/src/liblua.a ../deps/hdr_histogram/libhdrhistogram.a $(FINAL_LIBS)
  
  # redis-sentinel
