@@ -168,19 +168,16 @@ void toggle_region()
 
 void update_tail(esca_table_t* T)
 {
-    // avoid overwriting;
-    // FIXME: need to consider more -> cross table scenario
-    // FIXME: order of the head might be protected by barrier
-
-    while ((T->tail_entry + 1 == T->head_entry) && (T->tail_table == T->head_table))
-        ;
-
     if (T->tail_entry == MAX_TABLE_ENTRY - 1) {
         T->tail_entry = 0;
         T->tail_table = (T->tail_table == MAX_TABLE_LEN - 1) ? 0 : T->tail_table + 1;
     } else {
         T->tail_entry++;
     }
+
+    // avoid overwriting
+    while (esca_smp_load_acquire(&T->user_tables[T->tail_table][T->tail_entry].rstatus) == BENTRY_BUSY)
+        ;
 }
 
 void update_head(int* i, int* j)

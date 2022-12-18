@@ -476,7 +476,7 @@ static int main_worker(void* arg)
 #endif
             }
             // FIXME: need barrier?
-            ent->rstatus = BENTRY_EMPTY;
+            smp_store_release(&ent->rstatus, BENTRY_EMPTY);
 
             if (j == MAX_TABLE_ENTRY - 1) {
                 i = (i == MAX_TABLE_LEN - 1) ? 0 : i + 1;
@@ -604,7 +604,7 @@ static int wq_worker(void* arg)
                 ent->sysret = ret;
                 fill_cqe(ctx_id, ent);
                 work_node_reg[wrk_id]->cache_comp_num++;
-                ent->rstatus = BENTRY_EMPTY;
+                smp_store_release(&ent->rstatus, BENTRY_EMPTY);
 #if 0
                 printk(KERN_INFO "In wq-%d, do syscall %d : %d = (%d, %d, %ld, %d) at cpu%d\n", wrk_id,
                     ent->sysnum, ent->sysret, ent->args[0], ent->args[1], ent->args[2], ent->args[3], smp_processor_id());
@@ -787,7 +787,7 @@ asmlinkage long sys_esca_register(const struct __user pt_regs* regs)
     // setup context of fastio
     if (wrk_idx % RATIO == 0) {
         ctx[ctx_idx] = kmalloc(sizeof(struct fastio_ctx), GFP_KERNEL);
-        ctx[ctx_idx]->df_mask = MAX_DEFERRED_NUM - 1;
+        ctx[ctx_idx]->df_mask = DF_MASK;
         ctx[ctx_idx]->comp_num = 0;
         ctx[ctx_idx]->nxt_wq = 0;
         ctx[ctx_idx]->idle_time = msecs_to_jiffies(DEFAULT_WQ_IDLE_TIME);
