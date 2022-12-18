@@ -200,6 +200,7 @@ esca_table_entry_t* get_cqe(int i, int j)
     while (esca_smp_load_acquire(&res->rstatus) == BENTRY_EMPTY)
         ;
 
+    asm volatile("" ::: "memory");
     res->rstatus = BENTRY_EMPTY;
 
     return res;
