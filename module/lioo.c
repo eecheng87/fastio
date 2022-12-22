@@ -94,19 +94,6 @@ typedef asmlinkage long (*F6_t)(long, long, long, long, long, long);
 
 static struct task_struct* worker_task[CPU_NUM_LIMIT];
 
-// void (*wake_up_new_task_ptr)(struct task_struct *) = 0;
-
-static int ffs(unsigned int num)
-{
-    // return __builtin_ctz(num);
-    int mask = 1;
-    for (int i = 0; i < 32; i++, mask <<= 1)
-        if ((num & mask) != 0)
-            return i;
-
-    return 32;
-}
-
 static inline int get_nxt_wq(int idx)
 {
     int res;
