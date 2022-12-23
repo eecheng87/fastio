@@ -16,6 +16,7 @@ $(SUBDIRS):
 	$(MAKE) -C $@ $(MAKECMDGOALS)
 
 config:
+	sed -i "s#DEFAULT_CONFIG_PATH \".*\"#DEFAULT_CONFIG_PATH \"$(PWD)/esca\.conf\"#" module/include/esca.h
 	ln -s $(shell pwd)/wrapper/$(TARGET).c wrapper/target-preload.c
 
 reload:
