@@ -4,9 +4,9 @@ TOPTARGETS := all clean
 PWD := $(shell pwd)
 OUT := downloads
 
-REDIS_SOURCE := https://github.com/redis/redis/archive/refs/tags/7.0.5.zip
-REDIS_NAME := redis-7.0.5
-REDIS_ZIP_NAME := 7.0.5
+REDIS_SOURCE := https://github.com/redis/redis/archive/refs/tags/v1.3.12.zip
+REDIS_NAME := redis-1.3.12
+REDIS_ZIP_NAME := v1.3.12
 REDIS_PATH := $(REDIS_NAME)
 REDIS := redis
 

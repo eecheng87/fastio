@@ -60,4 +60,4 @@ echo/io_uring_echo_server
 echo/epoll_echo_server
 echo/proactor_echo_server
 echo/rps
-redis-7.0.5/
+redis-1.3.12/
