@@ -1,10 +1,10 @@
 # fastio
-FastIO is a fully asynchronous I/O interface extended from our previous work [SAIO](https://github.com/eecheng87/SAIO).
-This project extracts the concept from the recent kernel subsystem io_uring.
-System calls will not trap into kernel since there're kernel workers handling them in polling manner.
-Also, FastIO exploits wq-worker to offload the tasks which handles the data not in cache.
-It enhances the performance of system call intensive application (such as key-value server) by reducing the times of CPU mode switch.
-The evaluation shows that FastIO can linearly scale the throughput of network servers such as Redis.
+FastIO is an asynchronous I/O interface that has been developed based on our previous work, [SAIO](https://github.com/eecheng87/SAIO). 
+This project is built upon the concept of the io_uring kernel subsystem. 
+In FastIO, system calls are handled by kernel workers in a polling manner, which eliminates the need for trapping into the kernel. 
+Additionally, FastIO uses wq-worker to offload tasks that handle data not stored in cache, thus reducing the number of CPU mode switches. 
+This approach improves the performance of system call-intensive applications, such as key-value servers. 
+Through evaluations, we have demonstrated that FastIO can linearly scale the throughput of network servers, such as Redis.
 
 ## Build from source
 ```
