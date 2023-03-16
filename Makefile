@@ -16,7 +16,7 @@ $(SUBDIRS):
 	$(MAKE) -C $@ $(MAKECMDGOALS)
 
 config:
-	sed -i "s#DEFAULT_CONFIG_PATH \".*\"#DEFAULT_CONFIG_PATH \"$(PWD)/esca\.conf\"#" module/include/esca.h
+	sed -i "s#DEFAULT_CONFIG_PATH \".*\"#DEFAULT_CONFIG_PATH \"$(PWD)/fastio\.conf\"#" module/include/esca.h
 	ln -s $(shell pwd)/wrapper/$(TARGET).c wrapper/target-preload.c
 
 reload:
@@ -43,6 +43,6 @@ clean-out:
 	rm -rf auth
 
 recover:
-	git checkout HEAD -- configs/nginx.conf wrapper/ngx.c module/include/esca.h esca.conf
+	git checkout HEAD -- configs/nginx.conf wrapper/ngx.c module/include/esca.h fastio.conf
 
 .PHONY: $(TOPTARGETS) $(SUBDIRS) $(NGX) $(LIGHTY)

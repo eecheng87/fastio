@@ -25,7 +25,7 @@ cd echo && make
 ./proactor_echo_server 12345
 ```
 
-configure the value of `max_ker_worker` in `esca.conf` to spawn varied number of kernel workers.
+configure the value of `max_ker_worker` in `fastio.conf` to spawn varied number of kernel workers.
 
 ## Performance
 We compare the throughput (RPS) of conventional [echo-server](https://github.com/eecheng87/fastio/blob/main/echo/epoll_echo_server.c) and the [proactor-like echo-server](https://github.com/eecheng87/fastio/blob/main/echo/proactor_echo_server.c) on the top of FastIO.
